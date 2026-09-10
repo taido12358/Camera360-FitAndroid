@@ -7,7 +7,13 @@
 - Runtime `CAMERA` permission is required (declared in
   `AndroidManifest.xml`) — handle denial explicitly in the UI; do not
   assume the permission is granted (see rules/security/permissions-privacy.md).
-- The assumed horizontal FOV (`StitchingEngine.CAMERA_HFOV_DEG = 65.0`) is
-  not derived from CameraX/`CameraCharacteristics` — if you change camera
-  selection, lens, or zoom, verify this constant still matches or the
-  stitching output will be wrong. See docs/modules/camera360-stitching.md.
+- Horizontal FOV is measured at runtime from `CameraCharacteristics` via
+  `Camera2CameraInfo` (`CaptureScreen.measureHorizontalFovDeg`), stored in
+  `CaptureState.measuredHFovDeg`. `StitchingEngine.CAMERA_HFOV_DEG = 65.0`
+  is only the fallback if measurement fails — don't reintroduce a
+  hardcoded FOV assumption elsewhere. If you change camera selection,
+  lens, or zoom, verify the measurement path still returns a sane value.
+  See docs/modules/camera360-stitching.md.
+- `Camera2CameraInfo`/`getCameraCharacteristic` are gated behind
+  `@ExperimentalCamera2Interop` — any new use needs
+  `@OptIn(ExperimentalCamera2Interop::class)` on the containing function.

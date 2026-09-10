@@ -6,16 +6,26 @@ safe to unit test in isolation (see rules/testing/unit.md).
 ## Public surface
 
 - `StitchingEngine.stitch(inputs: List<FrameInput>, outputFile: File,
-  onProgress: (Float) -> Unit)` — suspend function, runs on
-  `Dispatchers.IO`. Requires exactly the frames the caller collected; it
-  does not validate frame count or coverage — that check lives in
-  `CaptureViewModel.stitchPanorama` (`inputs.size < s.totalFrames`).
+  hFovDeg: Double = CAMERA_HFOV_DEG, onProgress: (Float) -> Unit)` —
+  suspend function, runs on `Dispatchers.IO`. Requires exactly the frames
+  the caller collected; it does not validate frame count or coverage —
+  that check lives in `CaptureViewModel.stitchPanorama`
+  (`inputs.size < s.totalFrames`). Callers should pass the camera's
+  measured FOV (`CaptureState.measuredHFovDeg`) rather than relying on the
+  default fallback constant.
+- `FrameInput(file: File, rotationMatrix: FloatArray)` — `rotationMatrix`
+  is the 9-float device→world rotation matrix captured at shutter press
+  (see `CaptureViewModel.FrameTarget.capturedRotationMatrix`), **not**
+  azimuth/pitch. This is what makes stitching accurate even if the phone
+  was rolled/tilted between shots — see
+  docs/architecture/camera360-app.md.
 
-## Known constants that affect output quality/cost
+## Known constants/inputs that affect output quality/cost
 
-- `CAMERA_HFOV_DEG = 65.0` — assumed, not measured per-device. Wrong FOV
-  produces visible seams/ghosting. See
-  docs/architecture/camera360-app.md#constraints-worth-knowing-before-changing-this-code.
+- `hFovDeg` (parameter, defaults to `CAMERA_HFOV_DEG = 65.0`) — prefer the
+  value CaptureScreen measures from `CameraCharacteristics` at runtime;
+  the constant is only a fallback. Wrong FOV produces visible
+  seams/ghosting.
 - `OUT_W/OUT_H = 3840×1920` — fixed output size regardless of input
   resolution.
 - `MAX_FRAME_LONG_SIDE = 1024` — frames are downsampled before stitching;
@@ -27,8 +37,15 @@ safe to unit test in isolation (see rules/testing/unit.md).
 - `stitch()` throws `IllegalStateException` if every frame fails to
   decode — callers must catch this (`CaptureViewModel` does, via
   `stitchError`).
-- The algorithm has no feature matching/alignment correction — stitching
-  quality is entirely dependent on the accuracy of the gyroscope pose
-  recorded per frame (`capturedAzimuth`/`capturedPitch` in
-  `CaptureViewModel`). Do not "fix" seams by changing this engine before
-  confirming the pose data is the actual source of the seam.
+- Camera basis (`right`/`up`/`fwd`) is derived from `rotationMatrix` via
+  `cameraBasisFromRotationMatrix`, which assumes the back camera lens
+  points along the device's `-Z` axis (standard orientation-sensor
+  convention: device Z points out of the screen face). If a future change
+  targets the front camera or a device with a different sensor mounting,
+  this assumption must be revisited.
+- The algorithm still has no feature matching/alignment correction beyond
+  using the true captured pose — stitching quality now depends on (a) the
+  rotation matrix being accurate (it is, since it comes straight from the
+  system's sensor fusion) and (b) `hFovDeg` matching the real lens. Do not
+  "fix" seams by tweaking the blend weights before checking those two
+  first.

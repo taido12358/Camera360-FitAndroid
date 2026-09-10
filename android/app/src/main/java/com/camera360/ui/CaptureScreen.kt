@@ -2,8 +2,11 @@ package com.camera360.ui
 
 import android.Manifest
 import android.content.Intent
+import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Build
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
@@ -60,6 +63,7 @@ import com.camera360.StitchingEngine
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -107,6 +111,28 @@ private fun projectToScreen(
     return Offset(sx, sy)
 }
 
+/**
+ * Reads the bound back camera's real horizontal FOV from its
+ * [CameraCharacteristics] (focal length + physical sensor size) instead of
+ * relying on [StitchingEngine.CAMERA_HFOV_DEG]'s hardcoded assumption — this
+ * is what both the AR guide overlay and the final stitch should use for
+ * accurate projection. Returns null if the device doesn't report the needed
+ * characteristics.
+ */
+@OptIn(ExperimentalCamera2Interop::class)
+private fun measureHorizontalFovDeg(camera: androidx.camera.core.Camera): Double? {
+    return try {
+        val chars = Camera2CameraInfo.from(camera.cameraInfo)
+        val focalLengths = chars.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        val sensorSize = chars.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val focal = focalLengths?.firstOrNull()
+        if (focal == null || focal <= 0f || sensorSize == null) return null
+        Math.toDegrees(2.0 * atan((sensorSize.width / (2.0 * focal)).toDouble()))
+    } catch (e: Exception) {
+        null
+    }
+}
+
 // ── Main screen ──────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -142,6 +168,12 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
         ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
     }
 
+    // "Khi điện thoại xoay đến đúng vị trí thì mới chụp" — auto-fires capturePhoto
+    // once alignment holds steady; manual shutter below remains a fallback.
+    LaunchedEffect(Unit) {
+        viewModel.startAutoCapture(imageCapture, context)
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
 
         // ── Camera preview ────────────────────────────────────────────────
@@ -161,8 +193,9 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                             .also { it.surfaceProvider = pv.surfaceProvider }
                         try {
                             provider.unbindAll()
-                            provider.bindToLifecycle(lifecycleOwner,
+                            val camera = provider.bindToLifecycle(lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+                            measureHorizontalFovDeg(camera)?.let { viewModel.setMeasuredHFov(it) }
                         } catch (_: Exception) {}
                     }, ContextCompat.getMainExecutor(ctx))
                 }
@@ -234,16 +267,28 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
             }
         }
 
-        // ── "Chụp ngay!" aligned indicator ───────────────────────────────
+        // ── Auto-capture hold indicator — fills as alignment holds steady,
+        // then fires the shot automatically (see CaptureViewModel.startAutoCapture) ──
         if (state.isAligned && !state.allCaptured) {
-            Box(
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .align(Alignment.Center)
                     .padding(top = 120.dp)
                     .background(Color(0xFFFFEB3B).copy(alpha = 0.93f), RoundedCornerShape(8.dp))
                     .padding(horizontal = 18.dp, vertical = 7.dp)
             ) {
-                Text("Chụp ngay!", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (state.holdProgress >= 0.999f) "Đang chụp…" else "Giữ yên…",
+                    color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                LinearProgressIndicator(
+                    progress = { state.holdProgress },
+                    modifier = Modifier.width(90.dp).height(3.dp),
+                    color = Color.Black,
+                    trackColor = Color.Black.copy(alpha = 0.25f)
+                )
             }
         }
 
@@ -317,13 +362,14 @@ private fun SphereGuideOverlay(
         val cy = h / 2f
         val dotR = 26.dp.toPx()
         val nearestIdx = state.nearestUncapturedIndex
+        val hFov = state.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
 
         // Faint horizontal level lines at each row's pitch angle
         listOf(-35f, 0f, 35f).forEach { rowPitch ->
             val screenY = projectToScreen(
                 state.currentAzimuth, rowPitch,       // same az as camera, different pitch
                 state.currentAzimuth, state.currentPitch,
-                w, h
+                w, h, hFov
             )?.y ?: return@forEach
             if (screenY in 0f..h) {
                 drawLine(
@@ -339,7 +385,7 @@ private fun SphereGuideOverlay(
             val pos = projectToScreen(
                 frame.azimuth, frame.pitch,
                 state.currentAzimuth, state.currentPitch,
-                w, h
+                w, h, hFov
             ) ?: return@forEach   // null = behind camera; skip
 
             val x = pos.x; val y = pos.y
@@ -425,19 +471,27 @@ private fun SphereGuideOverlay(
 
 // ── Bottom action components ─────────────────────────────────────────────────────
 
+// Capture is automatic once the device holds alignment steady (see
+// CaptureViewModel.startAutoCapture) — this button is a manual fallback for
+// when the sensor can't confirm alignment (e.g. no gyroscope) or the user
+// wants to force a shot early.
 @Composable
 private fun ShutterButton(isCapturing: Boolean, isAligned: Boolean, onCapture: () -> Unit) {
     val ringColor  = if (isAligned) Color(0xFFFFEB3B) else Color.White
     val innerColor = when { isCapturing -> Color.Gray; isAligned -> Color(0xFFFFEB3B); else -> Color.White }
-    Box(
-        modifier = Modifier.size(88.dp).clip(CircleShape).border(4.dp, ringColor, CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            modifier = Modifier
-                .size(70.dp).clip(CircleShape).background(innerColor)
-                .clickable(enabled = !isCapturing, onClick = onCapture)
-        )
+            modifier = Modifier.size(88.dp).clip(CircleShape).border(4.dp, ringColor, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(70.dp).clip(CircleShape).background(innerColor)
+                    .clickable(enabled = !isCapturing, onClick = onCapture)
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text("Chụp thủ công (dự phòng)", color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp)
     }
 }
 

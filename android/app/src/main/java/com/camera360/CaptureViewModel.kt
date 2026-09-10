@@ -12,9 +12,12 @@ import androidx.camera.core.ImageCaptureException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -22,11 +25,24 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.sqrt
 
+/** Angular distance (degrees) within which the device is considered "aligned" to a target. */
+private const val ALIGNMENT_THRESHOLD_DEG = 10f
+
+/** How often the auto-capture loop polls alignment state. */
+private const val AUTO_CAPTURE_POLL_MS = 60L
+
+/** How long alignment must hold continuously before auto-capture fires — avoids motion blur / false triggers while swinging past a target. */
+private const val AUTO_CAPTURE_STABLE_MS = 350L
+
 /**
  * One of the 24 capture targets fixed in world space.
  * [azimuth] and [pitch] define its absolute world-space position.
  * [capturedAzimuth]/[capturedPitch] store the actual device orientation
- * at capture time — used for accurate stitching.
+ * at capture time — used for the on-screen guide/debugging.
+ * [capturedRotationMatrix] stores the actual full device orientation (9-float
+ * device→world rotation matrix) at capture time — this is what stitching uses;
+ * it stays accurate even if the phone was rolled/tilted, unlike azimuth/pitch
+ * alone. Null until captured, or if the device has no orientation sensor.
  */
 data class FrameTarget(
     val index: Int,
@@ -35,6 +51,7 @@ data class FrameTarget(
     val captured: Boolean = false,
     val capturedAzimuth: Float = azimuth,
     val capturedPitch: Float = pitch,
+    val capturedRotationMatrix: FloatArray? = null,
     val filePath: String? = null      // internal storage path for stitching
 )
 
@@ -54,7 +71,13 @@ data class CaptureState(
     val lastError: String? = null,
     val currentAzimuth: Float = 0f,
     val currentPitch: Float = 0f,
+    val currentRotationMatrix: FloatArray? = null,
+    // Measured from the bound camera's real CameraCharacteristics when available
+    // (see CaptureScreen) — falls back to StitchingEngine.CAMERA_HFOV_DEG if null.
+    val measuredHFovDeg: Double? = null,
     val frames: List<FrameTarget> = generateFrames(),
+    // Auto-capture: 0..1 progress while holding alignment steady, for UI feedback.
+    val holdProgress: Float = 0f,
     // Stitching
     val isStitching: Boolean = false,
     val stitchProgress: Float = 0f,
@@ -78,7 +101,7 @@ data class CaptureState(
         get() {
             val i = nearestUncapturedIndex
             if (i < 0) return false
-            return angularDist(currentAzimuth, currentPitch, frames[i].azimuth, frames[i].pitch) < 10f
+            return angularDist(currentAzimuth, currentPitch, frames[i].azimuth, frames[i].pitch) < ALIGNMENT_THRESHOLD_DEG
         }
 
     val allCaptured: Boolean get() = frames.all { it.captured }
@@ -124,11 +147,58 @@ class CaptureViewModel : ViewModel() {
     private val _state = MutableStateFlow(CaptureState())
     val state: StateFlow<CaptureState> = _state.asStateFlow()
     private val executor = Executors.newSingleThreadExecutor()
+    private var autoCaptureJob: Job? = null
 
     fun startSensor(context: Context) {
         viewModelScope.launch {
             GyroscopeManager(context).orientationFlow().collect { o ->
-                _state.value = _state.value.copy(currentAzimuth = o.azimuth, currentPitch = o.pitch)
+                _state.value = _state.value.copy(
+                    currentAzimuth = o.azimuth,
+                    currentPitch = o.pitch,
+                    currentRotationMatrix = o.rotationMatrix
+                )
+            }
+        }
+    }
+
+    /** Set once the bound camera's real horizontal FOV has been measured (see CaptureScreen). */
+    fun setMeasuredHFov(fovDeg: Double) {
+        _state.value = _state.value.copy(measuredHFovDeg = fovDeg)
+    }
+
+    /**
+     * Watches alignment and fires [capturePhoto] automatically once the device
+     * has held alignment to the nearest target for [AUTO_CAPTURE_STABLE_MS] —
+     * "chỉ chụp khi xoay đúng vị trí". A manual shutter (still wired in the UI)
+     * remains available as a fallback. Idempotent — safe to call more than once
+     * (e.g. from recomposition); only the first call starts the loop.
+     */
+    fun startAutoCapture(imageCapture: ImageCapture, context: Context) {
+        if (autoCaptureJob != null) return
+        autoCaptureJob = viewModelScope.launch {
+            var alignedSinceMs = -1L
+            while (isActive) {
+                delay(AUTO_CAPTURE_POLL_MS)
+                val s = _state.value
+                if (s.allCaptured || s.isCapturing || s.isStitching) {
+                    alignedSinceMs = -1L
+                    if (s.holdProgress != 0f) _state.value = _state.value.copy(holdProgress = 0f)
+                    continue
+                }
+                if (s.isAligned) {
+                    val now = System.currentTimeMillis()
+                    if (alignedSinceMs < 0L) alignedSinceMs = now
+                    val progress = ((now - alignedSinceMs).toFloat() / AUTO_CAPTURE_STABLE_MS).coerceIn(0f, 1f)
+                    if (progress != s.holdProgress) _state.value = _state.value.copy(holdProgress = progress)
+                    if (now - alignedSinceMs >= AUTO_CAPTURE_STABLE_MS) {
+                        alignedSinceMs = -1L
+                        _state.value = _state.value.copy(holdProgress = 0f)
+                        capturePhoto(imageCapture, context)
+                    }
+                } else {
+                    alignedSinceMs = -1L
+                    if (s.holdProgress != 0f) _state.value = _state.value.copy(holdProgress = 0f)
+                }
             }
         }
     }
@@ -142,6 +212,7 @@ class CaptureViewModel : ViewModel() {
         // Capture the exact device orientation at the moment of shutter press
         val snapAz = s.currentAzimuth
         val snapPitch = s.currentPitch
+        val snapMatrix = s.currentRotationMatrix
 
         _state.value = s.copy(isCapturing = true, lastError = null)
 
@@ -161,6 +232,7 @@ class CaptureViewModel : ViewModel() {
                     captured = true,
                     capturedAzimuth = snapAz,
                     capturedPitch = snapPitch,
+                    capturedRotationMatrix = snapMatrix,
                     filePath = frameFile.absolutePath
                 )
                 _state.value = _state.value.copy(
@@ -184,12 +256,13 @@ class CaptureViewModel : ViewModel() {
         val inputs = s.frames.mapNotNull { f ->
             val path = f.filePath ?: return@mapNotNull null
             val file = File(path)
+            val matrix = f.capturedRotationMatrix ?: return@mapNotNull null
             if (!file.exists()) return@mapNotNull null
-            StitchingEngine.FrameInput(file, f.capturedAzimuth, f.capturedPitch)
+            StitchingEngine.FrameInput(file, matrix)
         }
 
         if (inputs.size < s.totalFrames) {
-            _state.value = s.copy(stitchError = "Thiếu ${s.totalFrames - inputs.size} frame — vui lòng chụp lại")
+            _state.value = s.copy(stitchError = "Thiếu ${s.totalFrames - inputs.size} frame (thiếu dữ liệu cảm biến hoặc ảnh) — vui lòng chụp lại")
             return
         }
 
@@ -198,9 +271,10 @@ class CaptureViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val outputFile = File(context.filesDir, "panorama_${System.currentTimeMillis()}.jpg")
+                val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
 
                 withContext(Dispatchers.IO) {
-                    StitchingEngine.stitch(inputs, outputFile) { progress ->
+                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov) { progress ->
                         _state.value = _state.value.copy(stitchProgress = progress)
                     }
                     val panoramaName = "Camera360_panorama_${System.currentTimeMillis()}.jpg"
@@ -257,6 +331,7 @@ class CaptureViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        autoCaptureJob?.cancel()
         executor.shutdown()
     }
 }

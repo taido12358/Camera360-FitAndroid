@@ -9,7 +9,8 @@ import java.io.File
 import kotlin.math.*
 
 /**
- * Equirectangular panorama stitcher using known camera poses (azimuth + pitch).
+ * Equirectangular panorama stitcher using known camera poses (full 3D device
+ * orientation, not azimuth/pitch alone — see [FrameInput.rotationMatrix]).
  *
  * Algorithm: inverse projection — for every output pixel (worldAz, worldPitch),
  * find which captured frames cover that direction, sample each one with cosine
@@ -17,7 +18,11 @@ import kotlin.math.*
  */
 object StitchingEngine {
 
-    /** Assumed horizontal FOV of the phone camera (degrees). */
+    /**
+     * Fallback horizontal FOV (degrees) used only when the actual camera's FOV
+     * could not be measured (see [android.hardware.camera2.CameraCharacteristics]
+     * in CaptureScreen). Prefer passing a measured value to [stitch].
+     */
     const val CAMERA_HFOV_DEG = 65.0
 
     /** Output equirectangular size (2:1 ratio — standard for 360° photos). */
@@ -27,34 +32,61 @@ object StitchingEngine {
     /** Max long-side for loaded frames to keep peak memory reasonable. */
     private const val MAX_FRAME_LONG_SIDE = 1024
 
+    /**
+     * One captured frame plus the device's exact orientation at capture time.
+     *
+     * [rotationMatrix] is the 9-float, row-major device→world rotation matrix
+     * (as produced by [android.hardware.SensorManager.getRotationMatrixFromVector])
+     * captured at the moment of the shutter press. Using the full matrix — not
+     * just azimuth/pitch — is what lets stitching stay accurate even if the
+     * phone was slightly rolled/tilted between shots.
+     */
     data class FrameInput(
         val file: File,
-        val azimuth: Float,   // actual azimuth at capture time
-        val pitch: Float      // actual pitch at capture time
+        val rotationMatrix: FloatArray
     )
 
     private data class FrameData(
         val pixels: IntArray,
         val width: Int,
         val height: Int,
-        val azimuth: Float,
-        val pitch: Float,
+        // World-space camera basis vectors derived from the frame's rotation
+        // matrix — orthonormal, so camera-space = (dot(w,right), dot(w,up), dot(w,fwd)).
+        val right: DoubleArray,
+        val up: DoubleArray,
+        val fwd: DoubleArray,
         val tanHalfHFov: Double,
         val tanHalfVFov: Double
     )
 
+    /** Device axes assumed for the back camera: lens points out the -Z (screen) axis. */
+    private fun cameraBasisFromRotationMatrix(r: FloatArray): Triple<DoubleArray, DoubleArray, DoubleArray> {
+        // R maps device-frame vectors to world-frame: world = R * device.
+        // Right_world  = R * (1,0,0) = column 0 of R
+        // Up_world     = R * (0,1,0) = column 1 of R
+        // Fwd_world    = R * (0,0,-1) = -column 2 of R  (back lens points opposite the screen normal)
+        val right = doubleArrayOf(r[0].toDouble(), r[3].toDouble(), r[6].toDouble())
+        val up = doubleArrayOf(r[1].toDouble(), r[4].toDouble(), r[7].toDouble())
+        val fwd = doubleArrayOf(-r[2].toDouble(), -r[5].toDouble(), -r[8].toDouble())
+        return Triple(right, up, fwd)
+    }
+
     /**
-     * Stitch [inputs] into an equirectangular JPEG at [outputFile].
+     * Stitch [inputs] into an equirectangular JPEG at [outputFile], using
+     * [hFovDeg] as the camera's horizontal field of view — pass the value
+     * measured from [android.hardware.camera2.CameraCharacteristics] for best
+     * accuracy; only fall back to [CAMERA_HFOV_DEG] if measurement failed.
      * [onProgress] is called with 0..1 on the IO thread — safe to update StateFlow.
      */
     suspend fun stitch(
         inputs: List<FrameInput>,
         outputFile: File,
+        hFovDeg: Double = CAMERA_HFOV_DEG,
         onProgress: (Float) -> Unit
     ) = withContext(Dispatchers.IO) {
         onProgress(0f)
 
-        val hFovRad = Math.toRadians(CAMERA_HFOV_DEG)
+        val hFovRad = Math.toRadians(hFovDeg)
         val tanHalfHFov = tan(hFovRad / 2.0)
 
         // ── Load frames at reduced resolution ──────────────────────────────
@@ -74,10 +106,11 @@ object StitchingEngine {
                 bmp.getPixels(pixels, 0, sw, 0, 0, sw, sh)
                 bmp.recycle()
 
+                val (right, up, fwd) = cameraBasisFromRotationMatrix(input.rotationMatrix)
                 val vFovRad = hFovRad * sh / sw
                 FrameData(
                     pixels = pixels, width = sw, height = sh,
-                    azimuth = input.azimuth, pitch = input.pitch,
+                    right = right, up = up, fwd = fwd,
                     tanHalfHFov = tanHalfHFov,
                     tanHalfVFov = tan(vFovRad / 2.0)
                 )
@@ -107,17 +140,12 @@ object StitchingEngine {
                 var rAcc = 0.0; var gAcc = 0.0; var bAcc = 0.0; var wAcc = 0.0
 
                 frames.forEach { frame ->
-                    val caz = Math.toRadians(frame.azimuth.toDouble())
-                    val cp  = Math.toRadians(frame.pitch.toDouble())
-
-                    // Camera basis vectors in world space
-                    // Right  = (cos(caz),            0,          -sin(caz))
-                    // Up     = (-sin(caz)*sin(cp),   cos(cp),    -cos(caz)*sin(cp))
-                    // Fwd    = (sin(caz)*cos(cp),    sin(cp),    cos(caz)*cos(cp))
-
-                    val camX = wx * cos(caz)                         + wz * (-sin(caz))
-                    val camY = wx * (-sin(caz) * sin(cp)) + wy * cos(cp) + wz * (-cos(caz) * sin(cp))
-                    val camZ = wx * sin(caz) * cos(cp)   + wy * sin(cp)  + wz * cos(caz) * cos(cp)
+                    // Project the world direction into this frame's camera space
+                    // using its real orientation (right/up/fwd), not a
+                    // reconstructed-from-azimuth/pitch approximation.
+                    val camX = wx * frame.right[0] + wy * frame.right[1] + wz * frame.right[2]
+                    val camY = wx * frame.up[0] + wy * frame.up[1] + wz * frame.up[2]
+                    val camZ = wx * frame.fwd[0] + wy * frame.fwd[1] + wz * frame.fwd[2]
 
                     if (camZ <= 0.001) return@forEach   // behind this camera
 

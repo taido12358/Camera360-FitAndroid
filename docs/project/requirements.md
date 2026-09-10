@@ -21,15 +21,32 @@ As currently implemented, this means:
 - Save both the individual frames and the final panorama to the device
   gallery, in addition to internal app storage.
 
+Also confirmed 2026-09-10 (same session): capture must show the target
+points "in space" (world-fixed AR-style markers over the live preview —
+implemented as `SphereGuideOverlay`, pre-existing) and must fire the
+shutter automatically once the phone rotates into the correct position
+(implemented 2026-09-10: `CaptureViewModel.startAutoCapture`), not rely on
+the user judging alignment and tapping manually. Stitching accuracy was
+also raised explicitly — addressed by using each frame's full captured
+rotation matrix (not azimuth/pitch alone) and the camera's real measured
+FOV instead of a hardcoded constant; see
+docs/architecture/camera360-app.md.
+
+**Not yet verified**: none of this has been build-tested or run on a
+device in this session (no network available to fetch Gradle/dependencies
+here) — status is IMPLEMENTED, not TESTED/VERIFIED. See
+rules/testing/manual-qa.md before treating it as working.
+
 ### Open requirement questions (not yet confirmed)
 
 - Is 24 frames (3×8 grid) the intended final coverage, or should it be
   configurable / denser / sparser?
-- Is a fixed 65° assumed horizontal FOV (`StitchingEngine.CAMERA_HFOV_DEG`)
-  acceptable long-term, or should it be derived per-device/per-lens?
 - Should panoramas ever leave the device (export, share, cloud backup)?
 - Any target output format beyond JPEG (e.g. proper 360° metadata for
   viewers that expect an XMP panorama tag)?
+- Is the current alignment threshold (10°) and auto-capture stable-hold
+  window (350ms) the right feel, or does it need tuning after real-device
+  testing?
 
 Record answers to these as they're confirmed — update this file directly
 rather than letting them live only in conversation.

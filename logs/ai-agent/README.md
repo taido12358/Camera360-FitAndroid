@@ -8,6 +8,7 @@ rules/ai-agent/documentation.md for the required format.
 
 - 2026-09 →
   logs/ai-agent/sessions/2026/09/2026-09-10-session-001.md,
-  logs/ai-agent/sessions/2026/09/2026-09-10-session-002.md
+  logs/ai-agent/sessions/2026/09/2026-09-10-session-002.md,
+  logs/ai-agent/sessions/2026/09/2026-09-10-session-003.md
 
 Latest: → latest.md

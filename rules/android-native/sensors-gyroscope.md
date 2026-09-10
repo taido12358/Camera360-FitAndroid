@@ -13,3 +13,9 @@
 - Always `unregisterListener` on flow close (`awaitClose` already does
   this) — never leave a sensor listener registered past the screen's
   lifecycle; it drains battery.
+- `DeviceOrientation.rotationMatrix` is the **raw, unsmoothed** device→world
+  matrix, copied fresh per sensor event (`rotMatrix.copyOf()`) — never
+  emit the listener's reused `rotMatrix` array by reference, and never
+  apply the azimuth/pitch smoothing to it. It exists specifically for
+  accurate stitching pose (`StitchingEngine`); azimuth/pitch stay smoothed
+  for on-screen guidance only. Keep these two uses separate.

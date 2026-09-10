@@ -9,7 +9,18 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 
-data class DeviceOrientation(val azimuth: Float, val pitch: Float)
+/**
+ * [rotationMatrix] is the raw (unsmoothed) device→world rotation matrix from
+ * this sensor event — 9 floats, row-major, as produced by
+ * [SensorManager.getRotationMatrixFromVector]. It is a fresh copy per event
+ * (safe to hold onto), unlike [azimuth]/[pitch] which are smoothed for
+ * on-screen guidance and should not be used for stitching pose.
+ */
+data class DeviceOrientation(
+    val azimuth: Float,
+    val pitch: Float,
+    val rotationMatrix: FloatArray
+)
 
 class GyroscopeManager(context: Context) {
     private val sensorManager =
@@ -46,7 +57,10 @@ class GyroscopeManager(context: Context) {
                     smoothPitch += (rawPitch - smoothPitch) * alpha
                 }
 
-                trySend(DeviceOrientation(smoothAz, smoothPitch))
+                // rotMatrix is reused by the listener on every event — copy it so
+                // downstream collectors (esp. capture-time pose snapshot) aren't
+                // aliased to a buffer that mutates out from under them.
+                trySend(DeviceOrientation(smoothAz, smoothPitch, rotMatrix.copyOf()))
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
