@@ -2,56 +2,45 @@
 
 ## Project Phase
 
-FOUNDATION → first real feature work landed 2026-09-10 (TASK-003), not
-yet verified on a device.
+FOUNDATION -> Camera360 capture/stitching working end to end on the emulator;
+manual (no-sensor) mode implemented for the real test phone but not yet
+verified with real photos.
 
 ## What this project is
 
-Camera360: capture a scene from every angle with the phone camera, stitch
-all captures into one complete panorama, entirely on-device. See
-docs/project/overview.md and docs/project/requirements.md.
+Camera360: capture a scene from every angle with the phone camera, stitch all
+captures into one panorama, entirely on-device. See docs/project/overview.md and
+docs/project/requirements.md.
 
 ## Implemented
 
-- Camera360: 24-frame guided capture (gyroscope-driven), AR-style
-  world-fixed dot overlay (`SphereGuideOverlay`), auto-capture on
-  sustained alignment, and on-device equirectangular stitching using each
-  frame's full captured rotation matrix + a runtime-measured camera FOV.
-  **Not build-verified or device-tested this session** (no network access
-  to fetch Gradle/dependencies here) — see
-  logs/ai-agent/sessions/2026/09/2026-09-10-session-003.md.
-
-## Scaffolded
-
-- Knowledge system: rules/, docs/, tasks/, logs/.
+- Guided mode (devices with a rotation-vector sensor): 24-frame gyroscope-driven
+  capture, AR dot overlay (respects roll), auto-capture on sustained alignment,
+  pose-driven equirectangular stitching (parallel, bilinear, exposure/WB gain
+  compensation). Verified end to end on the emulator.
+- Manual mode (devices with only an accelerometer, e.g. the Galaxy A12 test
+  phone): free-form shots, gravity pitch/roll, heading from image registration,
+  crop to covered area. See tasks/active/current-task.md.
+- Portrait-locked activity; EXIF rotation applied when stitching.
+- 36 JVM unit tests + 1 on-device benchmark test.
 
 ## Verified
 
-None — no automated tests exist for Camera360, and TASK-003's changes
-have not been run on a device yet (see docs/workflow/testing.md and
-tasks/active/current-task.md).
+Guided mode + emulator: yes (emulator's virtual camera returns the same image for
+every pose, so seam/overlap quality is NOT assessable there).
+Manual mode: algorithm verified against synthetic ground truth and on-device
+timing (9 s for 30 photos on the A12); real-photo behaviour NOT verified.
 
-## Known Issues (Camera360)
+## Known Issues
 
-- No handling surfaced to the UI when a device lacks a gyroscope
-  (`GyroscopeManager.hasGyroscope == false`) — auto-capture and stitching
-  both silently degrade in that case. See
-  docs/modules/camera360-capture.md.
-- No automated tests, no CI/CD pipeline.
-- TASK-003 changes are unverified — must be built and manually QA'd on a
-  real device before considering this "done" (see
-  rules/testing/manual-qa.md).
-
-## Out of scope (not issues to fix)
-
-GoldenCare's known inconsistencies (unwired navigator, undeclared deps,
-RN/Android package mismatch) are no longer active concerns per ADR-0001 —
-left as-is unless GoldenCare is reintroduced.
+- Low-texture / repetitive scenes (plain walls, hazy windows, checkerboards) give
+  weak or wrong pair matches; the solver drops or misplaces a few photos there
+  (see docs/modules/camera360-stitching.md).
+- Manual mode result quality unknown until tested with real photos.
+- No CI/CD; connectedAndroidTest uninstalls the app from the device afterwards.
 
 ## Next Priority
 
-Build and manually test TASK-003 on a real device (full 24-frame capture,
-including a deliberately tilted/rolled shot to confirm the rotation-matrix
-stitching fix), then resolve the remaining open questions in
-docs/project/requirements.md (frame count/coverage, export/sharing,
-output format, alignment/hold-time tuning).
+Get real overlapping photos from the Galaxy A12 (user rotates the phone), inspect
+the panorama, and tune registration/blending on real data. Then: per-photo pitch
+correction from registration residuals, better blending (multi-band), export.

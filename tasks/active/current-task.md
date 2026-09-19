@@ -1,75 +1,47 @@
-# TASK-003
+# TASK-004
 
 ## Title
 
-Auto-capture on alignment + rotation-matrix-accurate stitching + measured FOV
+Camera360 on phones without a rotation-vector sensor (manual mode) + hardening
+found by real testing.
 
 ## Goal
 
-User asked for three things: (1) world-fixed dots showing capture
-positions "in space" — already existed (`SphereGuideOverlay`, not
-documented in the earlier session), (2) auto-capture the shot only once
-the phone rotates into the correct position instead of requiring a manual
-tap, (3) make the panorama stitching algorithm "thật chuẩn" (very
-accurate).
+The real test phone (Galaxy A12, SM-A127F) has only an accelerometer, so the
+sensor-driven pipeline (TASK-003) cannot run on it. Make Camera360 useful on such
+phones: free-form manual capture, gravity for pitch/roll, image registration for
+heading, then the existing renderer.
 
-## Scope
+## Scope (done)
 
-- `GyroscopeManager.kt`: expose the raw device→world rotation matrix
-  alongside smoothed azimuth/pitch.
-- `CaptureViewModel.kt`: store `capturedRotationMatrix` per frame; add
-  `startAutoCapture` (polls alignment, fires `capturePhoto` after a
-  350ms stable hold, exposes `holdProgress` for UI feedback); add
-  `setMeasuredHFov`/`measuredHFovDeg`.
-- `StitchingEngine.kt`: `FrameInput` now carries the full rotation matrix
-  instead of azimuth/pitch; per-frame camera basis (right/up/fwd) is
-  derived from that matrix instead of an azimuth/pitch reconstruction
-  that assumed zero roll; `stitch()` takes an `hFovDeg` parameter instead
-  of always using the hardcoded constant.
-- `CaptureScreen.kt`: measure the bound camera's real horizontal FOV via
-  `Camera2CameraInfo`/`CameraCharacteristics` and feed it to both the AR
-  overlay and the stitch call; wire up `startAutoCapture`; show a
-  hold-progress indicator during auto-capture; keep the manual shutter as
-  a labeled fallback.
-- Documentation: docs/architecture/camera360-app.md,
-  docs/modules/camera360-capture.md, docs/modules/camera360-stitching.md,
-  docs/project/requirements.md, rules/android-native/camera-camerax.md,
-  rules/android-native/sensors-gyroscope.md.
-
-## Dependencies
-
-TASK-002 (confirmed Camera360 is the project).
-
-## Affected App/Module
-
-Camera360 (native Android) — capture + stitching.
-
-## Acceptance Criteria
-
-- Stitching pose comes from the full captured rotation matrix, not
-  azimuth/pitch reconstruction (fixes roll-induced misalignment).
-- FOV used for both live AR overlay and final stitch comes from measured
-  `CameraCharacteristics` when available, constant only as fallback.
-- Capture fires automatically once alignment holds steady; manual shutter
-  still works as a fallback.
-- No regressions to the existing AR dot overlay, gallery mirroring, or
-  error handling paths.
+- `GravityManager`, `ManualShot`, manual-mode capture + UI (instructions, undo, stitch).
+- `PoseMath.rotationFromGravity`, `YawRegistration` (NCC registration, voting
+  placement, robust LS, consistency prune), `CoverageCrop`, `GainCompensation`.
+- Fixes found by running on the emulator/phone: camera-forward azimuth/pitch,
+  ENU axis swap, EXIF rotation, FOV semantics, portrait lock, overlay roll.
+- Tests: 36 JVM unit tests + 1 on-device benchmark (`androidTest`).
 
 ## Testing
 
-**Update 2026-09-19:** built and run on the emulator (see logs/ai-agent/sessions/2026/09/2026-09-19-session-004.md). Original note: no network access in this environment to fetch Gradle/
-dependencies, so the build could not be compiled or run here. Manually
-reviewed all changed files for type/logic correctness (see
-logs/ai-agent/sessions/2026/09/2026-09-10-session-003.md), but this has
-**not** been verified on a real device. Follow
-rules/testing/manual-qa.md (full 24-frame capture + stitch, including a
-deliberately tilted/rolled capture to confirm the rotation-matrix fix
-actually helps) before treating this as working.
+- JVM: `./gradlew testDebugUnitTest` (36 tests: PoseMath 9, GainCompensation 6,
+  YawRegistration 15 incl. real-photo texture / exposure drift / noise /
+  30-photo three-row sweep, CoverageCrop 6).
+- Device: `./gradlew connectedDebugAndroidTest` on the Galaxy A12: 30 photos
+  registered in ~9 s, all linked, error < 3 deg (synthetic sphere).
+- Emulator: guided 24-frame capture + stitch end to end (with sensors driven via
+  accelerometer + magnetometer).
+- Manual mode UI smoke-tested on the real phone (counter, undo, stitch, clear
+  Vietnamese error on featureless dark photos).
 
-## Documentation
+## NOT verified (needs the user)
 
-Updated as listed in Scope above.
+Manual mode with real overlapping photos on the phone: hold the phone, rotate
+slowly in a textured room taking a shot every ~25-30 deg (>= 40 % overlap), tap
+"Ghep anh", then inspect the panorama and the original shots (DCIM/Camera360).
+Also unverified on real data: gain compensation quality, accuracy of the FOV
+measured from CameraCharacteristics on the A12.
 
 ## Status
 
-PARTIALLY TESTED on emulator 2026-09-19 (full 24-frame auto/manual capture + stitch runs end-to-end, panorama written to DCIM/Camera360; two axis bugs found and fixed). NOT verified on a real device — emulator feeds the same image for every pose, so overlap/seam accuracy is unverified.
+IMPLEMENTED + unit/device-benchmark TESTED; real-photo behaviour on the phone
+NOT VERIFIED.
