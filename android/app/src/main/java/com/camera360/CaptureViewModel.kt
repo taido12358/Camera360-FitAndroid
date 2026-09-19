@@ -411,7 +411,7 @@ class CaptureViewModel : ViewModel() {
                         )
                     }
                     dropped += gray.size - linked.size
-                    val poses = YawRegistration.poses(gray, reg.headingsDeg)
+                    val poses = YawRegistration.poses(gray, reg.headingsDeg, reg.pitchOffsetsDeg)
 
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }

@@ -86,6 +86,9 @@ object YawRegistration {
     private const val REFINE_HALF_RANGE_DEG = 3.0
     private const val REFINE_STEP_DEG = 0.25
 
+    /** Cap on the per-photo pitch correction (the vertical search only reaches +-2 deg per pair). */
+    private const val MAX_PITCH_OFFSET_DEG = 3.0
+
     /** Vertical (elevation) offset searched between two photos to absorb gravity-sensor error. */
     private const val VERTICAL_HALF_RANGE_DEG = 2.0
 
@@ -99,6 +102,9 @@ object YawRegistration {
         val i: Int, val j: Int, val deltaDeg: Double, val ncc: Double, val cells: Int,
         /** Coarse NCC of the best shift minus the best clearly-different shift: how unambiguous the match is. */
         val margin: Double = 1.0
+,
+        /** Elevation offset found by the refinement: content at elevation e in photo j appears at e + verticalDeg in photo i. */
+        val verticalDeg: Double = 0.0
     )
 
     class Result(
@@ -106,7 +112,9 @@ object YawRegistration {
         val headingsDeg: DoubleArray,
         /** Indices of photos not linked (directly or transitively) to photo 0. */
         val unreachable: List<Int>,
-        val pairs: List<PairMatch>
+        val pairs: List<PairMatch>,
+        /** Per-photo pitch (elevation) bias of the accelerometer-derived gravity, from image registration; 0 where unknown. */
+        val pitchOffsetsDeg: DoubleArray = DoubleArray(headingsDeg.size)
     ) {
         val ok: Boolean get() = unreachable.isEmpty()
     }
@@ -319,7 +327,9 @@ object YawRegistration {
      * the correlation from collapsing on fine texture. Most of the search runs on the sparse cell
      * set (4x cheaper); the last evaluations use all cells. Returns (Δ, NCC, cells).
      */
-    private fun refine(si: Sampler, jCells: Cells, coarseDeg: Double): Triple<Double, Double, Int> {
+    private class Refined(val deltaDeg: Double, val ncc: Double, val cells: Int, val verticalDeg: Double)
+
+    private fun refine(si: Sampler, jCells: Cells, coarseDeg: Double): Refined {
         val acc = Accum()
 
         // Direction of each of j's cells after a yaw shift d (rotation about the vertical axis) and an
@@ -379,7 +389,7 @@ object YawRegistration {
         scanHorizontal(jCells, MIN_FINE_CELLS, bestD, 0.25, REFINE_STEP_DEG)
 
         accumulate(jCells, bestD, bestV)
-        return Triple(bestD, bestNcc, acc.n)
+        return Refined(bestD, bestNcc, acc.n, bestV)
     }
 
     // ── Public API ─────────────────────────────────────────────────────────────
@@ -420,9 +430,10 @@ object YawRegistration {
             if (c.ncc < CONFIDENT_NCC && c.ncc - c.runnerUpNcc < MIN_PEAK_MARGIN && minNcc > 0.0) continue
             val jCells = cellCache.getOrPut(j) { cellsOf(samplers[j]) }
             cellsMs += lap()
-            val (delta, ncc, cells) = refine(samplers[i], jCells, c.deltaDeg)
+            val fine = refine(samplers[i], jCells, c.deltaDeg)
+            val delta = fine.deltaDeg; val ncc = fine.ncc; val cells = fine.cells
             refineMs += lap(); refined++
-            if (ncc >= minNcc) pairs.add(PairMatch(i, j, wrap180(delta), ncc, cells, c.ncc - c.runnerUpNcc))
+            if (ncc >= minNcc) pairs.add(PairMatch(i, j, wrap180(delta), ncc, cells, c.ncc - c.runnerUpNcc, fine.verticalDeg))
         }
         lap()
         val result = solve(n, pairs)
@@ -601,12 +612,39 @@ object YawRegistration {
         }
         val unreachable = (0 until n).filter { !placed[it] }
 
+        // Per-photo pitch bias. Each agreeing edge measured b_i - b_j = verticalDeg, where b_p is how much
+        // higher photo p's gravity-derived levelling puts the scene than the truth. Same kind of linear
+        // system as the headings; only the *relative* biases are observable, so the mean is removed.
+        val pitchOffsets = DoubleArray(n)
+        run {
+            val nodes = (0 until n).filter { placed[it] }
+            if (nodes.size < 2) return@run
+            val idx = HashMap<Int, Int>().also { m -> nodes.filter { it != root }.forEachIndexed { k, v -> m[v] = k } }
+            val m = idx.size
+            val a = Array(m) { DoubleArray(m) }
+            val b = DoubleArray(m)
+            for (p in pairs) {
+                if (!placed[p.i] || !placed[p.j]) continue
+                if (abs(heading[p.j] - heading[p.i] - branch(p)) > INLIER_DEG) continue
+                val w = p.ncc * p.ncc
+                val d = -p.verticalDeg                       // b_j - b_i = -verticalDeg
+                val ki = idx[p.i]; val kj = idx[p.j]
+                if (kj != null) { a[kj][kj] += w; b[kj] += w * d }
+                if (ki != null) { a[ki][ki] += w; b[ki] -= w * d }
+                if (ki != null && kj != null) { a[ki][kj] -= w; a[kj][ki] -= w }
+            }
+            val x = GainCompensation.solveLinear(a, b)
+            for ((node, k) in idx) pitchOffsets[node] = x[k]
+            val mean = nodes.sumOf { pitchOffsets[it] } / nodes.size
+            for (node in nodes) pitchOffsets[node] = (pitchOffsets[node] - mean).coerceIn(-MAX_PITCH_OFFSET_DEG, MAX_PITCH_OFFSET_DEG)
+        }
+
         // Report relative to photo 0 whenever it is part of the solved group.
         if (!heading[0].isNaN() && heading[0] != 0.0) {
             val h0 = heading[0]
             for (k in 0 until n) if (!heading[k].isNaN()) heading[k] -= h0
         }
-        return Result(heading, unreachable, pairs)
+        return Result(heading, unreachable, pairs, pitchOffsets)
     }
 
     private fun wrap180(deg: Double): Double {
@@ -617,8 +655,16 @@ object YawRegistration {
     }
 
     /** Full-frame rotation matrices for [frames] given their [headingsDeg]. */
-    fun poses(frames: List<GrayFrame>, headingsDeg: DoubleArray): List<FloatArray> =
-        frames.mapIndexed { i, f -> PoseMath.rotationFromGravity(f.upDev, headingsDeg[i]) }
+    fun poses(
+        frames: List<GrayFrame>,
+        headingsDeg: DoubleArray,
+        pitchOffsetsDeg: DoubleArray? = null
+    ): List<FloatArray> = frames.mapIndexed { i, f ->
+        val r = PoseMath.rotationFromGravity(f.upDev, headingsDeg[i])
+        // If gravity puts photo i's scene b_i too high, the camera was really b_i lower: tilt by -b_i.
+        val bias = pitchOffsetsDeg?.getOrNull(i) ?: 0.0
+        if (bias.isNaN() || headingsDeg[i].isNaN()) r else PoseMath.tiltElevation(r, headingsDeg[i], -bias)
+    }
 
     /** Largest absolute difference between two headings on the circle, in degrees. */
     fun angularError(a: Double, b: Double): Double = abs(wrap180(a - b))

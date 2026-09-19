@@ -303,6 +303,31 @@ class YawRegistrationTest {
         assertEquals(4, YawRegistration.filterByTriangles(consistent).size)
     }
 
+    @Test fun pitchBiasOfGravity_isEstimatedAndCorrected() {
+        val world = World(52)
+        val rnd = Random(9)
+        val n = 9
+        val azs = (0 until n).map { it * 40.0 }
+        val els = (0 until n).map { (rnd.nextDouble() - 0.5) * 16.0 }
+        var bias = (0 until n).map { (rnd.nextDouble() - 0.5) * 3.0 }          // +-1.5 deg accelerometer pitch error
+        val meanBias = bias.average()
+        bias = bias.map { it - meanBias }                                     // only relative bias is observable
+        val frames = (0 until n).map { i ->
+            val truth = PoseMath.rotationFromAzElRoll(azs[i], els[i])
+            val clean = photo(world, truth)
+            // same picture, but the phone believes it was pitched bias[i] higher than it really was
+            val believed = PoseMath.rotationFromAzElRoll(azs[i], els[i] + bias[i])
+            GrayFrame(clean.width, clean.height, clean.luma, PoseMath.upInDevice(believed))
+        }
+        val res = YawRegistration.estimateHeadings(frames, longFov)
+        assertTrue("unreachable=${res.unreachable}", res.ok)
+        val before = (0 until n).map { abs(bias[it]) }.average()
+        val corrected = YawRegistration.poses(frames, res.headingsDeg, res.pitchOffsetsDeg)
+        val after = (0 until n).map { abs(PoseMath.elevationDeg(corrected[it]) - els[it]) }.average()
+        println("PITCH mean |error| before=${"%.2f".format(before)} after=${"%.2f".format(after)}")
+        assertTrue("pitch error should shrink (before $before, after $after)", after < before * 0.6)
+    }
+
     @Test fun strayFirstShot_doesNotSinkTheOthers() {
         val stray = photo(World(99), PoseMath.rotationFromAzElRoll(0.0, 0.0))
         val world = World(4)

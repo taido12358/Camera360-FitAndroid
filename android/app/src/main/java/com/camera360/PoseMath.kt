@@ -108,6 +108,33 @@ object PoseMath {
         )
     }
 
+    /**
+     * Returns [r] with the camera pitched by [deltaElevationDeg] (positive = looks higher), keeping its
+     * heading: the world is rotated about the horizontal axis at right angles to the camera's compass
+     * heading [headingDeg]. Used to apply per-photo pitch corrections estimated from image registration.
+     */
+    fun tiltElevation(r: FloatArray, headingDeg: Double, deltaElevationDeg: Double): FloatArray {
+        if (deltaElevationDeg == 0.0) return r
+        val h = Math.toRadians(headingDeg)
+        // horizontal axis to the right of the heading direction (ENU: east, north, up)
+        val ax = kotlin.math.cos(h); val ay = -kotlin.math.sin(h); val az = 0.0
+        val t = Math.toRadians(deltaElevationDeg)      // rotating the world about "right" by +delta raises the view by delta
+        val c = kotlin.math.cos(t); val s = kotlin.math.sin(t); val k = 1 - c
+        // Rodrigues rotation matrix (row-major)
+        val rot = doubleArrayOf(
+            c + ax * ax * k, ax * ay * k - az * s, ax * az * k + ay * s,
+            ay * ax * k + az * s, c + ay * ay * k, ay * az * k - ax * s,
+            az * ax * k - ay * s, az * ay * k + ax * s, c + az * az * k
+        )
+        val out = FloatArray(9)
+        for (i in 0..2) for (j in 0..2) {
+            var sum = 0.0
+            for (m in 0..2) sum += rot[i * 3 + m] * r[m * 3 + j]
+            out[i * 3 + j] = sum.toFloat()
+        }
+        return out
+    }
+
     /** World "up" in device coordinates for rotation matrix [r]: its third row. */
     fun upInDevice(r: FloatArray): DoubleArray =
         doubleArrayOf(r[6].toDouble(), r[7].toDouble(), r[8].toDouble())

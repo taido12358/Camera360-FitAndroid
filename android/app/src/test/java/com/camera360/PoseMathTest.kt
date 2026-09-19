@@ -1,6 +1,7 @@
 package com.camera360
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
@@ -117,5 +118,17 @@ class PoseMathTest {
 
     private fun assertVec(expected: DoubleArray, actual: DoubleArray) {
         for (i in 0..2) assertEquals("component $i", expected[i], actual[i], eps)
+    }
+
+    @Test fun tiltElevation_changesElevationByDelta_keepsHeading() {
+        for ((az, el, roll) in listOf(Triple(0.0, 0.0, 0.0), Triple(120.0, 20.0, 5.0), Triple(250.0, -30.0, -8.0))) {
+            val r = PoseMath.rotationFromAzElRoll(az, el, roll)
+            for (delta in listOf(-1.5, 0.7, 2.0)) {
+                val t = PoseMath.tiltElevation(r, az, delta)
+                assertEquals("elevation az=$az el=$el d=$delta", el + delta, PoseMath.elevationDeg(t).toDouble(), 0.02)
+                val heading = PoseMath.azimuthDeg(t).toDouble()
+                assertTrue("heading drifted: $heading vs $az", abs(((heading - az + 540) % 360) - 180) < 0.02)
+            }
+        }
     }
 }

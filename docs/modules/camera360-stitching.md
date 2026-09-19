@@ -202,3 +202,15 @@ blames only its **weakest-NCC** edge (blaming all three condemned good edges).
 Edges with blame and no support are dropped; edges in no triangle (chain
 neighbours) cannot be checked and are kept. On the hard three-row sweep this
 raised accurate photos 24 -> 26 of 30 and placed photos ~24 -> 28.
+
+### Per-photo pitch correction (2026-09-20)
+
+The refinement's vertical-offset search (see robustness notes) used to be thrown
+away: stitching trusted gravity pitch absolutely although accelerometer +
+hand tremor are only good to ~0.5-1 deg. Now each pair keeps `verticalDeg`
+(b_i - b_j, where b_p = how much higher photo p's gravity puts the scene than
+truth); `YawRegistration.solve` solves the per-photo biases over the
+heading-consistent edges (weighted LS, mean removed since only relative bias is
+observable, capped at 3 deg) and `poses(frames, headings, pitchOffsets)` tilts
+each pose by -b_p via `PoseMath.tiltElevation` (sign pinned by a unit test).
+Test with injected +-1.5 deg biases: mean pitch error 0.56 -> 0.14 deg.
