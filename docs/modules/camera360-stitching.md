@@ -272,3 +272,14 @@ downscale (target 960 px long side, still ~14 px/deg vs ~10.7 px/deg in the
 output): **135 MB peak, 24.5 s**. `OutOfMemoryError` (not an Exception) is now
 caught in both stitch paths and reported in Vietnamese instead of leaving the UI
 stuck on "stitching". Note: the timing is dominated by rendering 3840x1920.
+
+### Frame culling in the renderer (2026-09-20)
+
+Every output pixel used to be projected into all N photos although a direction is
+inside only 2-4 of them. `EquirectRenderer.extentOf` now computes, per photo, a
+conservative row band + circular column arc (border sampled 40x4 points, convex
+footprint; zenith/nadir photos get every azimuth), and both `render` and the
+gain estimation skip photos outside it. Output is pixel-identical (test
+`cullingFrames_doesNotChangeASinglePixel_andIsFaster`: 0 differing pixels; ~4.6x
+faster on the JVM). `StitchingDeviceTest` on the Galaxy A12, 30 photos:
+26 s -> **13.1 s**, peak Java heap 110 MB / 256 MB.

@@ -106,6 +106,21 @@ class EquirectRendererTest {
         assertTrue("geometry must match the true sphere (rmse $err)", err < 6.0)
     }
 
+    @Test fun cullingFrames_doesNotChangeASinglePixel_andIsFaster() {
+        val sphere = Sphere(5)
+        val frames = sweep(sphere)
+        val t0 = System.nanoTime()
+        val brute = EquirectRenderer.render(frames, outW, outH, compensateExposure = false, cullFrames = false)
+        val t1 = System.nanoTime()
+        val culled = EquirectRenderer.render(frames, outW, outH, compensateExposure = false, cullFrames = true)
+        val t2 = System.nanoTime()
+        println("RENDER culling: brute=${(t1 - t0) / 1_000_000} ms culled=${(t2 - t1) / 1_000_000} ms")
+        var diff = 0
+        for (i in brute.indices) if (brute[i] != culled[i]) diff++
+        assertEquals("culling must not change any pixel", 0, diff)
+        assertTrue("culling should be clearly faster (brute ${(t1 - t0) / 1_000_000} ms vs ${(t2 - t1) / 1_000_000} ms)", (t2 - t1) < (t1 - t0) * 0.8)
+    }
+
     @Test fun horizontalFlipOrWrongAxes_wouldBeCaught() {
         // Sanity check of the test itself: a render whose poses are mirrored east<->west must be much worse.
         val sphere = Sphere(5)
