@@ -17,3 +17,12 @@
 - `Camera2CameraInfo`/`getCameraCharacteristic` are gated behind
   `@ExperimentalCamera2Interop` — any new use needs
   `@OptIn(ExperimentalCamera2Interop::class)` on the containing function.
+
+## Portrait lock (2026-09-19)
+
+`MainActivity` is locked to `android:screenOrientation="portrait"`. The AR
+overlay (`projectToScreenWithMatrix`) and `StitchingEngine` both assume the
+device is held upright: image "right" = device +X, image "up" = device +Y, and
+the EXIF rotation applied to each frame maps sensor pixels to that upright
+portrait frame. Allowing landscape would silently break both. Do not remove
+the lock without reworking the basis vectors per display rotation.
