@@ -22,8 +22,57 @@ class YawRegistrationTest {
     private val w = 96
     private val h = 128
 
+    private interface Scene {
+        /** Brightness (0..255) seen along the world direction (east, north, up). */
+        fun value(e: Double, n: Double, u: Double): Double
+    }
+
+    /**
+     * A real photograph (an actual room interior) wrapped around the observer as an
+     * equirectangular strip covering elevations -60..+60 deg — natural image statistics
+     * (flat areas, edges, gradients) instead of synthetic sinusoids.
+     */
+    private class PhotoScene : Scene {
+        // Binary PGM (P5), upright grayscale, header "P5\n<w> <h>\n255\n".
+        private val iw: Int
+        private val ih: Int
+        private val gray: ByteArray
+
+        init {
+            val bytes = requireNotNull(PhotoScene::class.java.getResourceAsStream("/room_photo.pgm")) {
+                "missing room_photo.pgm"
+            }.readBytes()
+            var pos = 0
+            fun token(): String {
+                while (bytes[pos].toInt().toChar().isWhitespace()) pos++
+                val start = pos
+                while (!bytes[pos].toInt().toChar().isWhitespace()) pos++
+                return String(bytes, start, pos - start)
+            }
+            require(token() == "P5")
+            iw = token().toInt(); ih = token().toInt(); token()
+            pos++                                            // single whitespace after maxval
+            gray = bytes.copyOfRange(pos, pos + iw * ih)
+        }
+
+        private fun px(x: Int, y: Int): Double =
+            (gray[y.coerceIn(0, ih - 1) * iw + x.coerceIn(0, iw - 1)].toInt() and 0xFF).toDouble()
+
+        override fun value(e: Double, n: Double, u: Double): Double {
+            val az = Math.atan2(e, n)                                   // -pi..pi
+            val el = Math.toDegrees(Math.asin(u.coerceIn(-1.0, 1.0)))
+            if (el < -60.0 || el > 60.0) return 128.0
+            val fx = (az + Math.PI) / (2 * Math.PI) * iw - 0.5
+            val fy = (0.5 - el / 120.0) * ih - 0.5
+            val x0 = Math.floor(fx).toInt(); val y0 = Math.floor(fy).toInt()
+            val tx = fx - x0; val ty = fy - y0
+            return (px(x0, y0) * (1 - tx) + px(x0 + 1, y0) * tx) * (1 - ty) +
+                (px(x0, y0 + 1) * (1 - tx) + px(x0 + 1, y0 + 1) * tx) * ty
+        }
+    }
+
     /** A band-limited random texture defined on the unit sphere. */
-    private class World(seed: Long) {
+    private class World(seed: Long) : Scene {
         private val rnd = Random(seed)
         private val dirs = Array(70) {
             val v = doubleArrayOf(rnd.nextGaussian(), rnd.nextGaussian(), rnd.nextGaussian())
@@ -34,7 +83,7 @@ class YawRegistrationTest {
         private val phase = DoubleArray(dirs.size) { rnd.nextDouble() * 6.283 }
         private val amp = DoubleArray(dirs.size) { 0.4 + rnd.nextDouble() }
 
-        fun value(e: Double, n: Double, u: Double): Double {
+        override fun value(e: Double, n: Double, u: Double): Double {
             var s = 0.0
             for (k in dirs.indices) s += amp[k] * sin(dirs[k][0] * e + dirs[k][1] * n + dirs[k][2] * u + phase[k])
             return (128.0 + 14.0 * s).coerceIn(0.0, 255.0)
@@ -42,7 +91,14 @@ class YawRegistrationTest {
     }
 
     /** Photograph [world] with a virtual portrait phone at pose [r] (device→world). */
-    private fun photo(world: World, r: FloatArray, gravityNoiseDeg: Double = 0.0, rnd: Random = Random(1)): GrayFrame {
+    private fun photo(
+        world: Scene,
+        r: FloatArray,
+        gravityNoiseDeg: Double = 0.0,
+        rnd: Random = Random(1),
+        exposure: Double = 1.0,          // brightness multiplier about mid-grey (auto-exposure drift)
+        pixelNoise: Double = 0.0         // additive gaussian sensor noise (0..255 scale)
+    ): GrayFrame {
         val focal = (maxOf(w, h) / 2.0) / tan(Math.toRadians(longFov) / 2.0)
         val luma = FloatArray(w * h)
         for (py in 0 until h) for (px in 0 until w) {
@@ -53,7 +109,10 @@ class YawRegistrationTest {
             val n = r[3] * dx + r[4] * dy + r[5] * dz
             val u = r[6] * dx + r[7] * dy + r[8] * dz
             val len = sqrt(e * e + n * n + u * u)
-            luma[py * w + px] = world.value(e / len, n / len, u / len).toFloat()
+            var v = world.value(e / len, n / len, u / len)
+            v = 128.0 + (v - 128.0) * exposure
+            if (pixelNoise > 0.0) v += rnd.nextGaussian() * pixelNoise
+            luma[py * w + px] = v.coerceIn(0.0, 255.0).toFloat()
         }
         var up = PoseMath.upInDevice(r)
         if (gravityNoiseDeg > 0.0) {
@@ -148,6 +207,47 @@ class YawRegistrationTest {
         val res = YawRegistration.estimateHeadings(listOf(a, b), longFov)
         assertFalse("unrelated content must not be reported as matching", res.ok)
         assertEquals(listOf(1), res.unreachable)
+    }
+
+    // ── Realistic conditions: real photo texture, exposure drift, sensor noise ─────
+
+    @Test fun realPhoto_twoFrames_40degApart() {
+        val scene = PhotoScene()
+        val a = photo(scene, PoseMath.rotationFromAzElRoll(30.0, 0.0), rnd = Random(2))
+        val b = photo(scene, PoseMath.rotationFromAzElRoll(70.0, 0.0), rnd = Random(3))
+        val res = YawRegistration.estimateHeadings(listOf(a, b), longFov)
+        assertTrue("should link", res.ok)
+        assertEquals(40.0, res.headingsDeg[1], 1.5)
+    }
+
+    @Test fun realPhoto_fullCircle_withExposureDriftAndNoise() {
+        val scene = PhotoScene()
+        val rnd = Random(8)
+        val azs = (0 until 9).map { it * 40.0 }
+        val frames = azs.map { az ->
+            val el = (rnd.nextDouble() - 0.5) * 16.0
+            val roll = (rnd.nextDouble() - 0.5) * 6.0
+            val exposure = 0.8 + rnd.nextDouble() * 0.4          // 0.8 .. 1.2: AE re-metering per shot
+            photo(scene, PoseMath.rotationFromAzElRoll(az, el, roll), gravityNoiseDeg = 0.4, rnd = rnd,
+                exposure = exposure, pixelNoise = 4.0)
+        }
+        val res = YawRegistration.estimateHeadings(frames, longFov)
+        assertTrue("unreachable=${res.unreachable}", res.ok)
+        for (k in azs.indices) {
+            val err = YawRegistration.angularError(res.headingsDeg[k], azs[k])
+            assertTrue("frame $k heading ${res.headingsDeg[k]} vs ${azs[k]} (err $err)", err < 3.0)
+        }
+    }
+
+    @Test fun syntheticTexture_withExposureDrift_andHeavyNoise() {
+        val world = World(41)
+        val rnd = Random(5)
+        val azs = listOf(0.0, 35.0, 70.0, 105.0)
+        val frames = azs.map { photo(world, PoseMath.rotationFromAzElRoll(it, 0.0), rnd = rnd,
+            exposure = 0.75 + rnd.nextDouble() * 0.5, pixelNoise = 8.0) }
+        val res = YawRegistration.estimateHeadings(frames, longFov)
+        assertTrue(res.ok)
+        for (k in azs.indices) assertTrue("frame $k", YawRegistration.angularError(res.headingsDeg[k], azs[k]) < 2.0)
     }
 
     @Test fun strayFirstShot_doesNotSinkTheOthers() {

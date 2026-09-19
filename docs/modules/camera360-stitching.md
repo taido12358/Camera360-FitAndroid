@@ -122,3 +122,23 @@ photos, stray first photo). NOT yet verified with real photos on the phone —
 needs textured scenes (blank walls have nothing to correlate).
 Limits: assumes a rigid camera rotation (no parallax), a correct FOV, and
 accelerometer gravity within ~1 deg (hold still when shooting).
+
+### Registration robustness (2026-09-20, from realistic tests)
+
+Tests with a real room photo wrapped on a sphere + exposure drift (0.8-1.2x) +
+sensor noise + 0.4 deg gravity noise exposed three weaknesses, all fixed:
+
+- **Exposure / white balance**: photos are contrast-normalised before
+  correlation (local mean removed, divided by local std + floor 6), so AE
+  re-metering no longer changes the score (same poses: exposure-drift NCC
+  identical to clean).
+- **Gravity error**: 0.4 deg of accelerometer noise alone dropped a true pair's
+  NCC from 0.68 to 0.35, because the match assumed perfect levelling. The
+  refinement now also searches a +-2 deg vertical offset (coordinate descent),
+  restoring those pairs to 0.85-0.9.
+- **Weak / repetitive matches**: accept threshold is 0.40, but a match below 0.60
+  must beat the best *different* shift (outside +-8 deg) by >= 0.08, so
+  repetitive textures do not produce false links. False pairs measured <= 0.31.
+
+Known limit: plain, low-detail walls (little for correlation to lock onto) give
+weak or no links; the app then drops unlinkable photos with a notice.
