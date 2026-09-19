@@ -328,6 +328,44 @@ class YawRegistrationTest {
         assertTrue("pitch error should shrink (before $before, after $after)", after < before * 0.6)
     }
 
+    @Test fun everyPlacedPhoto_staysConnectedToTheRoot_evenWithManyFalseEdges() {
+        // Regression (code review): a photo linked only through a dropped photo used to stay "placed" with a bogus
+        // heading of ~1 deg. Property: on random graphs full of false edges, placed photos are always connected.
+        val rnd = Random(2024)
+        repeat(300) { trial ->
+            val n = 9
+            val truth = DoubleArray(n) { rnd.nextDouble() * 360.0 }
+            val pairs = ArrayList<YawRegistration.PairMatch>()
+            for (i in 0 until n) for (j in i + 1 until n) {
+                if (rnd.nextDouble() > 0.35) continue
+                val good = rnd.nextDouble() < 0.5
+                val d = if (good) YawRegistration.wrap180(truth[j] - truth[i]) + rnd.nextGaussian() * 0.5 else (rnd.nextDouble() - 0.5) * 300.0
+                pairs.add(YawRegistration.PairMatch(i, j, d, 0.4 + rnd.nextDouble() * 0.55, 500))
+            }
+            val res = YawRegistration.solve(n, pairs)
+            val placed = (0 until n).filter { !res.headingsDeg[it].isNaN() }
+            if (placed.size < 2) return@repeat
+            // BFS over the returned edges among placed photos, starting anywhere placed
+            val seen = HashSet<Int>(); val stack = ArrayDeque<Int>()
+            stack.addLast(placed[0]); seen.add(placed[0])
+            while (stack.isNotEmpty()) {
+                val u = stack.removeLast()
+                for (p in res.pairs) {
+                    if (res.headingsDeg[p.i].isNaN() || res.headingsDeg[p.j].isNaN()) continue
+                    val v = when (u) { p.i -> p.j; p.j -> p.i; else -> continue }
+                    if (seen.add(v)) stack.addLast(v)
+                }
+            }
+            assertTrue("trial $trial: placed photos $placed but only ${seen.sorted()} are connected through kept edges", seen.containsAll(placed))
+            assertTrue("trial $trial: unreachable list must match NaN headings", res.unreachable.toSet() == (0 until n).filter { res.headingsDeg[it].isNaN() }.toSet())
+        }
+    }
+
+    @Test fun wrap180_isUsableFromOutside() {
+        assertEquals(-170.0, YawRegistration.wrap180(190.0), 1e-9)
+        assertEquals(180.0, YawRegistration.wrap180(-180.0), 1e-9)
+    }
+
     @Test fun strayFirstShot_doesNotSinkTheOthers() {
         val stray = photo(World(99), PoseMath.rotationFromAzElRoll(0.0, 0.0))
         val world = World(4)

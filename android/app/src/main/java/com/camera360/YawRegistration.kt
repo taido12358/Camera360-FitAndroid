@@ -476,7 +476,9 @@ object YawRegistration {
         fun rescaled(fov: Double): List<PairMatch> {
             val ratio = tan(Math.toRadians(fov) / 2.0) / tanInit      // tan(angle) measured at this FOV = measured tan(angle) * this
             return pairs.map { p ->
-                val d = Math.toDegrees(kotlin.math.atan(tan(Math.toRadians(p.deltaDeg)) * ratio))
+                // tan(new) = tan(old) * ratio, quadrant preserved (atan alone breaks for |delta| >= 90 deg)
+                val rad = Math.toRadians(p.deltaDeg)
+                val d = Math.toDegrees(kotlin.math.atan2(sin(rad) * ratio, cos(rad)))
                 p.copy(deltaDeg = d)
             }
         }
@@ -713,6 +715,22 @@ object YawRegistration {
             }
         }
 
+        /** A photo that was only linked to the root through a dropped photo has no evidence left: drop it too. */
+        fun unplaceDisconnected() {
+            val seen = BooleanArray(n)
+            val stack = ArrayDeque<Int>()
+            seen[root] = true; stack.addLast(root)
+            while (stack.isNotEmpty()) {
+                val u = stack.removeLast()
+                for (p in pairs) {
+                    if (!placed[p.i] || !placed[p.j]) continue
+                    val v = when (u) { p.i -> p.j; p.j -> p.i; else -> continue }
+                    if (!seen[v]) { seen[v] = true; stack.addLast(v) }
+                }
+            }
+            for (u in 0 until n) if (placed[u] && !seen[u]) { placed[u] = false; heading[u] = Double.NaN }
+        }
+
         refineAll()
 
         // Consistency check: a photo whose edges mostly contradict the solution (weight share within
@@ -735,8 +753,10 @@ object YawRegistration {
             if (worstNode < 0 || worstShare >= MIN_INLIER_SHARE) return@repeat
             placed[worstNode] = false
             heading[worstNode] = Double.NaN
+            unplaceDisconnected()
             refineAll()
         }
+        unplaceDisconnected()
         val unreachable = (0 until n).filter { !placed[it] }
 
         // Per-photo pitch bias. Each agreeing edge measured b_i - b_j = verticalDeg, where b_p is how much
@@ -774,7 +794,7 @@ object YawRegistration {
         return Result(heading, unreachable, pairs, pitchOffsets)
     }
 
-    private fun wrap180(deg: Double): Double {
+    internal fun wrap180(deg: Double): Double {
         var d = deg % 360.0
         if (d > 180.0) d -= 360.0
         if (d <= -180.0) d += 360.0

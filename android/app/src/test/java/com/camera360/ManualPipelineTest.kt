@@ -176,7 +176,12 @@ class ManualPipelineTest {
         return best
     }
 
-    @Test fun guidedRefinement_repairsNoisyAndDriftingSensorHeadings() {
+    @Test fun guidedRefinement_repairsNoisyAndDriftingSensorHeadings() = guidedRefinementCase(azOffset = 0.0)
+
+    /** Registration's zero is photo 0 and the offset to the sensor is minus its heading, so a start near 180 deg puts the offsets on the +-180 wrap point (code-review finding). */
+    @Test fun guidedRefinement_worksWhenTheSensorOffsetSitsOnThe180Wrap() = guidedRefinementCase(azOffset = 178.0)
+
+    private fun guidedRefinementCase(azOffset: Double) {
         val sphere = Sphere(23)
         val rnd = Random(77)
         val shots = plan(rnd)
@@ -187,9 +192,9 @@ class ManualPipelineTest {
         val gray = ArrayList<GrayFrame>()
         val rgb = ArrayList<IntArray>()
         for ((i, s) in shots.withIndex()) {
-            val truth = PoseMath.rotationFromAzElRoll(s.az, s.el, s.roll)
+            val truth = PoseMath.rotationFromAzElRoll(s.az + azOffset, s.el, s.roll)
             val drift = 6.0 * (i - n / 2.0) / n                                       // zero-mean slow drift, +-3 deg
-            val sensor = PoseMath.rotationFromAzElRoll(s.az + drift + rnd.nextGaussian() * 3.0, s.el + rnd.nextGaussian() * 0.3, s.roll)
+            val sensor = PoseMath.rotationFromAzElRoll(s.az + azOffset + drift + rnd.nextGaussian() * 3.0, s.el + rnd.nextGaussian() * 0.3, s.roll)
             sensorPoses.add(sensor)
             val small = shoot(sphere, truth, 108, 144, s.gain)
             gray.add(GrayFrame(108, 144, luma(small), PoseMath.upInDevice(sensor)))

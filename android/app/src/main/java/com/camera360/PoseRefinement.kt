@@ -47,14 +47,18 @@ object PoseRefinement {
         // them robustly (circular median of registered - sensor) so a few bad photos cannot skew it.
         val placed = (0 until n).filter { !reg.headingsDeg[it].isNaN() }
         if (placed.size < n * MIN_TRUSTED_SHARE) return unchanged
-        val diffs = placed.map { wrap180(reg.headingsDeg[it] - sensorHeading[it]) }.sorted()
-        val medianDiff = diffs[diffs.size / 2]                       // differences are near each other, so no wrap issue after wrap180
-        val offset = medianDiff
+        // Circular median: centre the differences on their circular mean first, so a cluster straddling +-180 deg
+        // is not split by the wrap point, then take the median of the deviations.
+        val diffs = placed.map { reg.headingsDeg[it] - sensorHeading[it] }
+        val meanRad = kotlin.math.atan2(diffs.sumOf { kotlin.math.sin(Math.toRadians(it)) }, diffs.sumOf { kotlin.math.cos(Math.toRadians(it)) })
+        val reference = Math.toDegrees(meanRad)
+        val deviations = diffs.map { YawRegistration.wrap180(it - reference) }.sorted()
+        val offset = reference + deviations[deviations.size / 2]
 
         val trusted = BooleanArray(n)
         val change = DoubleArray(n)
         for (i in placed) {
-            val d = wrap180(reg.headingsDeg[i] - sensorHeading[i] - offset)
+            val d = YawRegistration.wrap180(reg.headingsDeg[i] - sensorHeading[i] - offset)
             if (abs(d) <= TRUST_DEG) { trusted[i] = true; change[i] = d }
         }
         val trustedCount = trusted.count { it }
@@ -70,10 +74,4 @@ object PoseRefinement {
         return Result(poses, trustedCount, change)
     }
 
-    private fun wrap180(deg: Double): Double {
-        var d = deg % 360.0
-        if (d > 180.0) d -= 360.0
-        if (d <= -180.0) d += 360.0
-        return d
-    }
 }

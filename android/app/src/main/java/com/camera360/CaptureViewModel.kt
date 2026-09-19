@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -216,6 +217,15 @@ class CaptureViewModel : ViewModel() {
     }
 
     private var gravityJob: Job? = null
+    private var sensorJob: Job? = null
+
+    // The Activity (and its ImageCapture) can be re-created while this ViewModel lives on, so the auto-capture
+    // loop must use the newest ones, not those of the first composition (and must not hold an Activity context).
+    @Volatile private var autoImageCapture: ImageCapture? = null
+    @Volatile private var autoAppContext: Context? = null
+
+    /** Monotonic id for manual shot files, so undo + re-shoot can never reuse (and overwrite) a name. */
+    private val manualSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
     /** Newest gravity direction; kept out of [state] because it changes ~50 times a second. */
     @Volatile private var latestUp: FloatArray? = null
@@ -225,13 +235,19 @@ class CaptureViewModel : ViewModel() {
             startGravity(context)
             return
         }
-        viewModelScope.launch {
+        // One collector for the ViewModel's lifetime: this is called from a LaunchedEffect and would otherwise stack
+        // another listener on every Activity re-creation.
+        if (sensorJob != null) return
+        sensorJob = viewModelScope.launch {
             GyroscopeManager(context.applicationContext).orientationFlow().collect { o ->
-                _state.value = _state.value.copy(
-                    currentAzimuth = o.azimuth,
-                    currentPitch = o.pitch,
-                    currentRotationMatrix = o.rotationMatrix
-                )
+                // atomic: this fires ~50 times a second while camera-executor threads also write the state
+                _state.update {
+                    it.copy(
+                        currentAzimuth = o.azimuth,
+                        currentPitch = o.pitch,
+                        currentRotationMatrix = o.rotationMatrix
+                    )
+                }
             }
         }
     }
@@ -248,10 +264,12 @@ class CaptureViewModel : ViewModel() {
                 val steady = tracker.update(SystemClock.elapsedRealtime(), up)
                 val tilt = GravityMath.elevationDeg(up).roundToInt()
                 val roll = GravityMath.rollDeg(up).roundToInt()
-                val cur = _state.value
-                // Only publish when something the UI shows actually changed (avoids 50 recompositions a second).
-                if (cur.currentGravityUp == null || cur.tiltDeg != tilt || cur.rollDeg != roll || cur.isSteady != steady) {
-                    _state.value = cur.copy(currentGravityUp = up, tiltDeg = tilt, rollDeg = roll, isSteady = steady)
+                // Only publish when something the UI shows actually changed (avoids 50 recompositions a second);
+                // atomic because camera-executor threads write the state too.
+                _state.update { cur ->
+                    if (cur.currentGravityUp == null || cur.tiltDeg != tilt || cur.rollDeg != roll || cur.isSteady != steady) {
+                        cur.copy(currentGravityUp = up, tiltDeg = tilt, rollDeg = roll, isSteady = steady)
+                    } else cur
                 }
             }
         }
@@ -277,6 +295,8 @@ class CaptureViewModel : ViewModel() {
         // instead of running a loop that would otherwise fire off a frozen
         // (0,0) reading.
         if (!ensureGyroscopeChecked(context)) return
+        autoImageCapture = imageCapture
+        autoAppContext = context.applicationContext
         if (autoCaptureJob != null) return
         autoCaptureJob = viewModelScope.launch {
             var alignedSinceMs = -1L
@@ -296,7 +316,7 @@ class CaptureViewModel : ViewModel() {
                     if (now - alignedSinceMs >= AUTO_CAPTURE_STABLE_MS) {
                         alignedSinceMs = -1L
                         _state.value = _state.value.copy(holdProgress = 0f)
-                        capturePhoto(imageCapture, context)
+                        capturePhoto(autoImageCapture ?: imageCapture, autoAppContext ?: context)
                     }
                 } else {
                     alignedSinceMs = -1L
@@ -334,19 +354,23 @@ class CaptureViewModel : ViewModel() {
                 copyToGallery(context, frameFile,
                     "Camera360_%04d_%d.jpg".format(idx + 1, System.currentTimeMillis()))
 
-                val updated = _state.value.frames.toMutableList()
-                updated[idx] = updated[idx].copy(
-                    captured = true,
-                    capturedAzimuth = snapAz,
-                    capturedPitch = snapPitch,
-                    capturedRotationMatrix = snapMatrix,
-                    filePath = frameFile.absolutePath
-                )
-                _state.value = _state.value.copy(
-                    capturedFrames = _state.value.capturedFrames + 1,
-                    isCapturing = false,
-                    frames = updated
-                )
+                // Runs on the camera executor while the sensors write the state from the main thread: one atomic
+                // read-modify-write, so a concurrent orientation update can never overwrite the captured frame.
+                _state.update { cur ->
+                    val updated = cur.frames.toMutableList()
+                    updated[idx] = updated[idx].copy(
+                        captured = true,
+                        capturedAzimuth = snapAz,
+                        capturedPitch = snapPitch,
+                        capturedRotationMatrix = snapMatrix,
+                        filePath = frameFile.absolutePath
+                    )
+                    cur.copy(
+                        capturedFrames = cur.capturedFrames + 1,
+                        isCapturing = false,
+                        frames = updated
+                    )
+                }
             }
 
             override fun onError(ex: ImageCaptureException) {
@@ -363,19 +387,20 @@ class CaptureViewModel : ViewModel() {
         _state.value = s.copy(isCapturing = true, lastError = null, stitchNotice = null)
 
         val framesDir = File(context.filesDir, "frames").also { it.mkdirs() }
-        val frameFile = File(framesDir, "manual_%04d.jpg".format(s.manualShots.size + 1))
+        val frameFile = File(framesDir, "manual_%04d.jpg".format(manualSeq.incrementAndGet()))
         val outputOptions = ImageCapture.OutputFileOptions.Builder(frameFile).build()
 
         imageCapture.takePicture(outputOptions, executor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 copyToGallery(context, frameFile,
                     "Camera360_manual_%d.jpg".format(System.currentTimeMillis()))
-                val cur = _state.value
-                _state.value = cur.copy(
-                    isCapturing = false,
-                    manualShots = cur.manualShots + ManualShot(frameFile.absolutePath, gravity),
-                    lastError = if (gravity == null) "Không đọc được cảm biến gia tốc — ảnh này không thể dùng để ghép" else null
-                )
+                _state.update { cur ->
+                    cur.copy(
+                        isCapturing = false,
+                        manualShots = cur.manualShots + ManualShot(frameFile.absolutePath, gravity),
+                        lastError = if (gravity == null) "Không đọc được cảm biến gia tốc — ảnh này không thể dùng để ghép" else null
+                    )
+                }
             }
 
             override fun onError(ex: ImageCaptureException) {
@@ -388,7 +413,7 @@ class CaptureViewModel : ViewModel() {
     /** Manual mode: drop the most recent shot (e.g. it was blurry). */
     fun undoLastManualShot() {
         val s = _state.value
-        if (s.isStitching || s.manualShots.isEmpty()) return
+        if (s.isStitching || s.isCapturing || s.manualShots.isEmpty()) return       // not while a shot is being written
         val removed = s.manualShots.last()
         _state.value = s.copy(manualShots = s.manualShots.dropLast(1), lastError = null, stitchError = null, stitchNotice = null)
         viewModelScope.launch(Dispatchers.IO) { runCatching { File(removed.filePath).delete() } }   // it is never used again
@@ -583,7 +608,8 @@ class CaptureViewModel : ViewModel() {
                 val outputFile = File(context.filesDir, "panorama_${System.currentTimeMillis()}.jpg")
                 val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
 
-                withContext(Dispatchers.IO) {
+                withContext(Dispatchers.Default) {        // CPU-bound (registration + rendering), not I/O
+                    _state.update { it.copy(stitchProgress = 0.02f) }
                     // Sharpen the sensor poses with image registration (compass noise/drift indoors shows up as
                     // ghosting). Purely an improvement step: any failure, or photos that disagree with their
                     // sensor pose, simply leave the sensor poses untouched.

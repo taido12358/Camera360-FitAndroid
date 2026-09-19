@@ -88,18 +88,26 @@ object EquirectRenderer {
         val rowsDone = AtomicInteger(0)
         val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
         // Rows are independent: render interleaved row sets on parallel threads.
+        // A failure on a worker (e.g. OutOfMemoryError) must reach the caller: uncaught, it would kill the
+        // process, and swallowed it would leave whole rows of the picture missing.
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
         val threads = (0 until workers).map { w ->
             Thread {
-                var oy = w
-                while (oy < outH) {
-                    renderRow(oy, outW, outH, frames, extents, sinAz, cosAz, out, blendPower)
-                    val done = rowsDone.incrementAndGet()
-                    if (onProgress != null && done % 48 == 0) onProgress(done.toFloat() / outH)
-                    oy += workers
+                try {
+                    var oy = w
+                    while (oy < outH && failure.get() == null) {
+                        renderRow(oy, outW, outH, frames, extents, sinAz, cosAz, out, blendPower)
+                        val done = rowsDone.incrementAndGet()
+                        if (onProgress != null && done % 48 == 0) onProgress(done.toFloat() / outH)
+                        oy += workers
+                    }
+                } catch (t: Throwable) {
+                    failure.compareAndSet(null, t)
                 }
             }.also { it.start() }
         }
         threads.forEach { it.join() }
+        failure.get()?.let { throw it }
         return out
     }
 

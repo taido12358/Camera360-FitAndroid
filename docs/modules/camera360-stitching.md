@@ -324,3 +324,28 @@ peak margin, vertical offset). Pull it with
 (debug build) so a real-phone run can be analysed from numbers, not only from
 the picture. The original shots stay in `files/frames/manual_*.jpg` until
 "Chụp lại" is tapped.
+
+### Code-review findings fixed (2026-09-20)
+
+An independent review pass (code-review skill, `high`) of `YawRegistration`,
+`CaptureViewModel`, `PoseRefinement`, `EquirectRenderer` found real bugs, all
+fixed with regression tests where testable:
+
+- **Disconnected photos stayed "placed"** (heading ~1 deg) after the consistency
+  prune dropped the photo they hung from -> `unplaceDisconnected()`; property test
+  on 300 random graphs full of false edges (`everyPlacedPhoto_staysConnected...`).
+- **`PoseRefinement` "circular median" was linear**, wrong when the sensor offset
+  sits on the +-180 deg wrap (start heading ~180) and silently discarded the whole
+  refinement -> centre on the circular mean first; test with a 178 deg start.
+- **FOV rescale used `atan`**, wrong for pair shifts >= 90 deg -> `atan2`.
+- **Manual shot file names reused** (`size + 1`) could overwrite a shot after
+  undo during a capture -> monotonic counter; undo blocked while capturing.
+- **Sensor collectors stacked** on Activity re-creation and auto-capture kept the
+  first Activity's context/ImageCapture -> single `sensorJob`, latest ImageCapture
+  + application context.
+- **Lost updates**: camera-executor `onImageSaved` and the 50 Hz sensor collectors
+  now use atomic `StateFlow.update`.
+- **Renderer worker failures** (e.g. OOM) are captured and rethrown to the caller
+  instead of crashing the process or leaving black rows (test added).
+- Guided refinement moved from `Dispatchers.IO` to `Default` (CPU-bound).
+Not changed: micro-optimisations of `coarseMatch`/`cellsOf` (speed is fine on the A12).

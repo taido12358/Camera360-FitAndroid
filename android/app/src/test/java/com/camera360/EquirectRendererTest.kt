@@ -121,6 +121,16 @@ class EquirectRendererTest {
         assertTrue("culling should be clearly faster (brute ${(t1 - t0) / 1_000_000} ms vs ${(t2 - t1) / 1_000_000} ms)", (t2 - t1) < (t1 - t0) * 0.8)
     }
 
+    @Test fun aFailureOnARenderThread_reachesTheCaller_insteadOfLeavingBlackRows() {
+        val sphere = Sphere(5)
+        val good = sweep(sphere)
+        // a frame with too few pixels makes sampleFrame index out of bounds on some row -> must throw, not return a partial image
+        val broken = EquirectRenderer.Frame(IntArray(4), pw, ph, PoseMath.rotationFromAzElRoll(0.0, 0.0), longFov)
+        var thrown = false
+        try { EquirectRenderer.render(good + broken, outW, outH, compensateExposure = false) } catch (t: Throwable) { thrown = true }
+        assertTrue("a worker-thread exception must propagate", thrown)
+    }
+
     @Test fun horizontalFlipOrWrongAxes_wouldBeCaught() {
         // Sanity check of the test itself: a render whose poses are mirrored east<->west must be much worse.
         val sphere = Sphere(5)
