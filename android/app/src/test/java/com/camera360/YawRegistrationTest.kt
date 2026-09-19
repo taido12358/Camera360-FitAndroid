@@ -275,9 +275,32 @@ class YawRegistrationTest {
         val placed = truth.indices.filter { !res.headingsDeg[it].isNaN() }
         val errs = placed.map { YawRegistration.angularError(res.headingsDeg[it] - res.headingsDeg[0], truth[it] - truth[0]) }
         val accurate = errs.count { it < 4.0 }
+        println("SWEEP placed=${placed.size}/30 accurate(<4deg)=$accurate maxErr=${"%.1f".format(errs.maxOrNull() ?: -1.0)}")
         assertTrue("only ${placed.size}/30 placed (unreachable=${res.unreachable})", placed.size >= 24)
         assertTrue("only $accurate/${placed.size} placed photos accurate (errs=${errs.map { "%.1f".format(it) }})",
             accurate >= placed.size * 0.8)
+    }
+
+    @Test fun triangleFilter_dropsTheWeakEdgeOfAnInconsistentTriangle_keepsTheRest() {
+        // photos 0,1,2 at true headings 0, 40, 80: edges 0-1 (40) and 1-2 (40) are right, the weak 0-2 edge
+        // claims 55 (should be 80) -> it is the culprit of the inconsistent triangle.
+        val pairs = listOf(
+            YawRegistration.PairMatch(0, 1, 40.0, 0.9, 900),
+            YawRegistration.PairMatch(1, 2, 40.0, 0.85, 900),
+            YawRegistration.PairMatch(0, 2, 55.0, 0.5, 400)
+        )
+        val kept = YawRegistration.filterByTriangles(pairs)
+        assertEquals(listOf(0 to 1, 1 to 2), kept.map { it.i to it.j })
+    }
+
+    @Test fun triangleFilter_keepsConsistentTrianglesAndUncheckableEdges() {
+        val consistent = listOf(
+            YawRegistration.PairMatch(0, 1, 30.0, 0.7, 900),
+            YawRegistration.PairMatch(1, 2, 30.0, 0.7, 900),
+            YawRegistration.PairMatch(0, 2, 60.5, 0.6, 900),
+            YawRegistration.PairMatch(2, 3, 25.0, 0.45, 900)        // in no triangle: cannot be checked, kept
+        )
+        assertEquals(4, YawRegistration.filterByTriangles(consistent).size)
     }
 
     @Test fun strayFirstShot_doesNotSinkTheOthers() {

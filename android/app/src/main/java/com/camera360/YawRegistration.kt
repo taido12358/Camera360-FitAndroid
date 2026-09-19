@@ -79,6 +79,9 @@ object YawRegistration {
     /** A placed photo must have at least this share (by weight) of its edges agreeing with the solution. */
     private const val MIN_INLIER_SHARE = 0.5
 
+    /** Three relative headings around a triangle of photos must close to within this many degrees. */
+    private const val TRIANGLE_TOL_DEG = 3.0
+
     /** Half width (deg) of the refinement search around the coarse peak, and its step. */
     private const val REFINE_HALF_RANGE_DEG = 3.0
     private const val REFINE_STEP_DEG = 0.25
@@ -432,6 +435,49 @@ object YawRegistration {
     }
 
     /**
+     * Loop-consistency filter (suggested by an independent review of the false-match problem): three
+     * genuine relative headings around a triangle of photos sum to 0 (mod 360 deg), a false one almost
+     * never fits with two other edges. An edge that closes at least one triangle within [TRIANGLE_TOL_DEG]
+     * is kept; one that only sits in inconsistent triangles is dropped; one that is in no triangle at all
+     * cannot be checked and is kept if it is reasonably strong.
+     */
+    fun filterByTriangles(pairs: List<PairMatch>): List<PairMatch> {
+        if (pairs.size < 3) return pairs
+        fun key(a: Int, b: Int) = (minOf(a, b).toLong() shl 32) or maxOf(a, b).toLong()
+        val edgeOf = HashMap<Long, Int>()
+        val neighbours = HashMap<Int, MutableSet<Int>>()
+        for ((e, p) in pairs.withIndex()) {
+            edgeOf[key(p.i, p.j)] = e
+            neighbours.getOrPut(p.i) { HashSet() }.add(p.j)
+            neighbours.getOrPut(p.j) { HashSet() }.add(p.i)
+        }
+        /** signed heading change a -> b, whichever way round the pair was stored */
+        fun d(a: Int, b: Int): Double {
+            val p = pairs[edgeOf.getValue(key(a, b))]
+            return if (p.i == a) p.deltaDeg else -p.deltaDeg
+        }
+
+        val support = IntArray(pairs.size)
+        val blame = IntArray(pairs.size)
+        for ((a, na) in neighbours) for (b in na) {
+            if (b <= a) continue
+            for (c in neighbours.getValue(b)) {
+                if (c <= b || c !in na) continue
+                val eab = edgeOf.getValue(key(a, b)); val ebc = edgeOf.getValue(key(b, c)); val eac = edgeOf.getValue(key(a, c))
+                if (abs(wrap180(d(a, b) + d(b, c) - d(a, c))) <= TRIANGLE_TOL_DEG) {
+                    support[eab]++; support[ebc]++; support[eac]++
+                } else {
+                    // Which edge is wrong is unknown, but the weakest correlation is the likeliest culprit;
+                    // blaming all three would condemn two good edges for one bad one.
+                    val weakest = listOf(eab, ebc, eac).minByOrNull { pairs[it].ncc }!!
+                    blame[weakest]++
+                }
+            }
+        }
+        return pairs.filterIndexed { e, _ -> support[e] > 0 || blame[e] == 0 }
+    }
+
+    /**
      * Solves headings from pair measurements (exposed for testing the graph logic on its own).
      *
      * Individual pair matches cannot be trusted on their own — repetitive textures produce
@@ -442,7 +488,8 @@ object YawRegistration {
      * [CLUSTER_DEG]). Wrong matches scatter, right ones cluster. A least-squares refinement over
      * all edges (Cauchy re-weighted, closes 360 deg loops) follows.
      */
-    fun solve(n: Int, pairs: List<PairMatch>): Result {
+    fun solve(n: Int, allPairs: List<PairMatch>): Result {
+        val pairs = filterByTriangles(allPairs)
         val heading = DoubleArray(n) { Double.NaN }
         if (n == 0) return Result(heading, emptyList(), pairs)
 

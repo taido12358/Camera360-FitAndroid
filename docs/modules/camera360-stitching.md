@@ -188,3 +188,17 @@ and yaw/elevation rotation formulas instead of sin/cos per sample; refinement
 runs on a 1/4 sparse cell set, full set only for the last polish steps; coarse
 match skips shifts whose azimuth footprints cannot intersect. The same JVM
 workload takes ~2 s, i.e. this phone is ~4-5x slower than the dev machine.
+
+### Triangle (loop-consistency) filter (2026-09-20)
+
+Suggested by an independent review (Gemini, consulted via Chrome as the
+project owner asked) of the false-match problem; SIFT/ORB matching and
+GNC-TLS were noted but not adopted (Android OpenCV has no features2d Java
+bindings; the existing IRLS + consistency prune covers most of what GNC offers).
+`YawRegistration.filterByTriangles` runs before the graph solve: for every
+triangle of photos with all three edges, relative headings must close to
+within 3 deg. A closing triangle supports all three edges; an inconsistent one
+blames only its **weakest-NCC** edge (blaming all three condemned good edges).
+Edges with blame and no support are dropped; edges in no triangle (chain
+neighbours) cannot be checked and are kept. On the hard three-row sweep this
+raised accurate photos 24 -> 26 of 30 and placed photos ~24 -> 28.
