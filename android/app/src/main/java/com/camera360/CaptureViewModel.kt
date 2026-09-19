@@ -447,6 +447,9 @@ class CaptureViewModel : ViewModel() {
                     _state.value = _state.value.copy(stitchProgress = 0.30f)
                     val linked = gray.indices.filter { !reg.headingsDeg[it].isNaN() }
                     if (linked.size < 2) {
+                        // Failures are exactly when the numbers are needed most.
+                        writeDiagnostics(context, usableShots, reg, hFov, fovUsed, calibrated.fovAdjusted, null,
+                            unreadable, registrationMs, 0L, phaseLines)
                         throw IllegalStateException(
                             "Không tìm thấy phần chung giữa các ảnh. Hãy chụp lại: xoay chậm, mỗi ảnh chồng lấn " +
                                 "khoảng 30–50% với ảnh trước, và hướng vào cảnh có nhiều chi tiết (không phải tường trơn)."
