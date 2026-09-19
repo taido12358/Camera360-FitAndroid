@@ -165,4 +165,59 @@ class ManualPipelineTest {
         val (_, _, calibrated) = runPipeline(longFov, calibrate = true)
         assertTrue("calibration must not disturb a correct FOV ($plain vs $calibrated)", calibrated <= plain * 1.1)
     }
+
+    /** RMSE after allowing the whole panorama to be rotated by up to +-10 deg (absolute heading is unobservable from images). */
+    private fun rmseUpToRotation(sphere: Sphere, out: IntArray): Double {
+        var best = Double.MAX_VALUE
+        for (shift in -20..20) {
+            val shifted = IntArray(out.size) { i -> val y = i / outW; val x = i % outW; out[y * outW + ((x + shift) % outW + outW) % outW] }
+            best = minOf(best, rmse(sphere, shifted))
+        }
+        return best
+    }
+
+    @Test fun guidedRefinement_repairsNoisyAndDriftingSensorHeadings() {
+        val sphere = Sphere(23)
+        val rnd = Random(77)
+        val shots = plan(rnd)
+        val n = shots.size
+
+        // What a phone with a rotation-vector sensor delivers: exact-ish pitch/roll, heading with compass noise + drift.
+        val sensorPoses = ArrayList<FloatArray>()
+        val gray = ArrayList<GrayFrame>()
+        val rgb = ArrayList<IntArray>()
+        for ((i, s) in shots.withIndex()) {
+            val truth = PoseMath.rotationFromAzElRoll(s.az, s.el, s.roll)
+            val drift = 6.0 * (i - n / 2.0) / n                                       // zero-mean slow drift, +-3 deg
+            val sensor = PoseMath.rotationFromAzElRoll(s.az + drift + rnd.nextGaussian() * 3.0, s.el + rnd.nextGaussian() * 0.3, s.roll)
+            sensorPoses.add(sensor)
+            val small = shoot(sphere, truth, 108, 144, s.gain)
+            gray.add(GrayFrame(108, 144, luma(small), PoseMath.upInDevice(sensor)))
+            rgb.add(shoot(sphere, truth, 240, 320, s.gain))
+        }
+
+        val refined = PoseRefinement.refine(gray, sensorPoses, longFov)
+        println("REFINE refined ${refined.refinedCount}/$n photos")
+        fun render(poses: List<FloatArray>) = EquirectRenderer.render(
+            (0 until n).map { EquirectRenderer.Frame(rgb[it], 240, 320, poses[it], longFov) }, outW, outH, compensateExposure = true
+        )
+        val eSensor = rmseUpToRotation(sphere, render(sensorPoses))
+        val eRefined = rmseUpToRotation(sphere, render(refined.poses))
+        println("REFINE rmse sensor poses=${"%.2f".format(eSensor)} refined=${"%.2f".format(eRefined)}")
+        assertTrue("most photos should be refined (${refined.refinedCount}/$n)", refined.refinedCount >= n * 0.8)
+        assertTrue("refinement must clearly improve on noisy sensor headings ($eSensor -> $eRefined)", eRefined < eSensor * 0.7)
+    }
+
+    @Test fun guidedRefinement_leavesGoodSensorPosesAlone_andFallsBackWhenImagesDisagree() {
+        val sphere = Sphere(23)
+        val rnd = Random(5)
+        val shots = plan(rnd)
+        val truthPoses = shots.map { PoseMath.rotationFromAzElRoll(it.az, it.el, it.roll) }
+        // photos of a DIFFERENT world than the poses describe: registration finds nothing consistent
+        val other = Sphere(999)
+        val grayBad = shots.indices.map { GrayFrame(108, 144, luma(shoot(other, truthPoses[(it * 7) % truthPoses.size], 108, 144, shots[it].gain)), PoseMath.upInDevice(truthPoses[it])) }
+        val r = PoseRefinement.refine(grayBad, truthPoses, longFov)
+        // whatever it decides, it must not corrupt poses: unrefined ones are returned as the exact sensor matrices
+        for (i in shots.indices) if (r.headingChangeDeg[i] == 0.0) assertTrue(r.poses[i].contentEquals(truthPoses[i]))
+    }
 }

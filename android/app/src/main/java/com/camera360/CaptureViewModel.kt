@@ -541,8 +541,28 @@ class CaptureViewModel : ViewModel() {
                 val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
 
                 withContext(Dispatchers.IO) {
-                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov) { progress ->
-                        _state.value = _state.value.copy(stitchProgress = progress)
+                    // Sharpen the sensor poses with image registration (compass noise/drift indoors shows up as
+                    // ghosting). Purely an improvement step: any failure, or photos that disagree with their
+                    // sensor pose, simply leave the sensor poses untouched.
+                    val finalInputs = try {
+                        val gray = inputs.map { input ->
+                            val r = input.rotationMatrix
+                            loadGray(input.file, floatArrayOf(r[6], r[7], r[8]))
+                        }
+                        if (gray.any { it == null }) inputs else {
+                            val refined = PoseRefinement.refine(gray.filterNotNull(), inputs.map { it.rotationMatrix }, hFov)
+                            Log.i("CaptureVM", "Pose refinement: ${refined.refinedCount}/${inputs.size} photos refined by image registration")
+                            inputs.mapIndexed { i, input -> StitchingEngine.FrameInput(input.file, refined.poses[i]) }
+                        }
+                    } catch (e: OutOfMemoryError) {
+                        Log.w("CaptureVM", "Pose refinement skipped (out of memory)", e); inputs
+                    } catch (e: Exception) {
+                        Log.w("CaptureVM", "Pose refinement skipped", e); inputs
+                    }
+                    _state.value = _state.value.copy(stitchProgress = 0.25f)
+
+                    StitchingEngine.stitch(finalInputs, outputFile, hFovDeg = hFov) { progress ->
+                        _state.value = _state.value.copy(stitchProgress = 0.25f + 0.75f * progress)
                     }
                     val panoramaName = "Camera360_panorama_${System.currentTimeMillis()}.jpg"
                     copyToGallery(context, outputFile, panoramaName)

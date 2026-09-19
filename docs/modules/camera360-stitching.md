@@ -296,3 +296,18 @@ faster on the JVM). `StitchingDeviceTest` on the Galaxy A12, 30 photos:
   finish to 960 px). `StitchingDeviceTest` now uses a 12 MP file: 30 poses stitched
   in **13.1 s, peak heap 124 MB / 256 MB**.
 - 30 shots take ~78 MB in app storage plus the same again in the gallery mirror.
+
+### Guided mode: sensor poses refined by image registration (2026-09-20)
+
+Phones with a rotation-vector sensor now also run `PoseRefinement.refine` before
+rendering: the compass part of the rotation vector is disturbed indoors and its
+errors show up as ghosting at seams. Each photo's registered heading replaces
+its sensor heading only if it agrees to within 12 deg after removing the single
+global offset (circular median); photos that disagree keep their sensor pose,
+and if fewer than 60 % of photos are placed and trusted the sensor poses are
+returned untouched. Any exception / OOM in this step falls back to the sensor
+poses. Synthetic test (sensor heading noise 3 deg + +-3 deg drift, compared up
+to a global rotation): RMSE **26.4 -> 5.9**, 30/30 photos refined. On the
+emulator (same image for every pose, so registration contradicts the sensor):
+"Pose refinement: 0/24" and the normal panorama - the fallback works. Not yet
+seen on a real phone with a rotation-vector sensor.
