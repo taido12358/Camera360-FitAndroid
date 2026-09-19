@@ -117,3 +117,11 @@ largest circular gap. In manual mode a gap of 15 deg or more is reported in the
 completion notice ("Ảnh phủ N% vòng ngang, còn hở khoảng G°...") so the user
 knows where to shoot more. Guided mode ignores the result (it always aims at
 full coverage).
+
+## Screen stays on (2026-09-20)
+
+`MainActivity` sets `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` (verified
+in `dumpsys window`: window flags went from `fl=81810100` to `81810180`).
+The first attempt, `PreviewView.keepScreenOn = true`, never showed up in the
+window flags on the test phone, so it was replaced. A sweep takes minutes and
+stitching ~25 s; on the test phone the screen otherwise dims and re-locks.
