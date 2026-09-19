@@ -283,3 +283,16 @@ gain estimation skip photos outside it. Output is pixel-identical (test
 `cullingFrames_doesNotChangeASinglePixel_andIsFaster`: 0 differing pixels; ~4.6x
 faster on the JVM). `StitchingDeviceTest` on the Galaxy A12, 30 photos:
 26 s -> **13.1 s**, peak Java heap 110 MB / 256 MB.
+
+### Facts measured on the real test phone (Galaxy A12 SM-A127F, 2026-09-20)
+
+- Back camera (id 0): focal length 4.6 mm, sensor 6.4 x 4.8 mm, 4000x3000 (full
+  4:3) -> long-side FOV = 2*atan(6.4/(2*4.6)) = **69.6 deg** (short side 55.2);
+  the app logs the same value from CameraCharacteristics
+  (`CaptureVM: Measured long-side FOV ... 69.6 deg`). The 65 deg fallback would
+  have been ~7 % off.
+- A real capture: **4000x3000 JPEG, EXIF orientation 6, ~2.6 MB** - matches the
+  assumption behind `ImageIo.loadUpright` (decode with inSampleSize 4, rotate,
+  finish to 960 px). `StitchingDeviceTest` now uses a 12 MP file: 30 poses stitched
+  in **13.1 s, peak heap 124 MB / 256 MB**.
+- 30 shots take ~78 MB in app storage plus the same again in the gallery mirror.

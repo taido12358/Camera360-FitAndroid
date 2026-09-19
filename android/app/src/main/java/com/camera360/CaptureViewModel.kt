@@ -259,6 +259,7 @@ class CaptureViewModel : ViewModel() {
 
     /** Set once the bound camera's real horizontal FOV has been measured (see CaptureScreen). */
     fun setMeasuredHFov(fovDeg: Double) {
+        Log.i("CaptureVM", "Measured long-side FOV from CameraCharacteristics: ${"%.1f".format(fovDeg)} deg")
         _state.value = _state.value.copy(measuredHFovDeg = fovDeg)
     }
 

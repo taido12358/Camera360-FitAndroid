@@ -16,15 +16,16 @@ import kotlin.math.sin
 
 /**
  * Runs the real Android stitching path (JPEG decode with EXIF rotation -> renderer -> crop -> JPEG encode)
- * on the device with a realistic session size (30 photos of 1280x960 as CameraX writes them), and logs
+ * on the device with a realistic session size (30 photos of 4000x3000 as the Galaxy A12 writes them), and logs
  * time and memory so out-of-memory risk on low-RAM phones is measured, not guessed.
  */
 @RunWith(AndroidJUnit4::class)
 class StitchingDeviceTest {
 
     private fun writeFrame(file: File, seed: Int) {
-        // 1280x960 landscape sensor pixels + EXIF "rotate 90 cw", like CameraX portrait captures
-        val w = 1280; val h = 960
+        // 4000x3000 landscape sensor pixels + EXIF "rotate 90 cw": exactly what the Galaxy A12 delivers
+        // (verified by pulling a real capture: 4000x3000, orientation 6, ~2.6 MB)
+        val w = 4000; val h = 3000
         val px = IntArray(w * h)
         for (y in 0 until h) for (x in 0 until w) {
             val v = (128 + 60 * sin(x * 0.045 + seed) * sin(y * 0.06 + seed * 0.7) + 30 * sin((x + y) * 0.02)).toInt().coerceIn(0, 255)
@@ -42,10 +43,11 @@ class StitchingDeviceTest {
     @Test fun thirtyPhotoSession_stitchesWithoutRunningOutOfMemory() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val dir = File(ctx.cacheDir, "stitch_test").also { it.deleteRecursively(); it.mkdirs() }
+        val shared = File(dir, "shared_12mp.jpg").also { writeFrame(it, 3) }
         val inputs = ArrayList<StitchingEngine.FrameInput>()
         for (row in 0 until 3) for (k in 0 until 10) {
-            val f = File(dir, "f_${row}_$k.jpg")
-            writeFrame(f, row * 10 + k)
+            // one real-size JPEG shared by all 30 poses (writing 30 x 12 MP on the device would dominate the test)
+            val f = shared
             inputs.add(StitchingEngine.FrameInput(f, PoseMath.rotationFromAzElRoll(k * 36.0 + row * 6.0, (row - 1) * 28.0, 0.0)))
         }
         val out = File(dir, "pano.jpg")
