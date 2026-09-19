@@ -19,11 +19,11 @@ heading, then the existing renderer.
   placement, robust LS, consistency prune), `CoverageCrop`, `GainCompensation`.
 - Fixes found by running on the emulator/phone: camera-forward azimuth/pitch,
   ENU axis swap, EXIF rotation, FOV semantics, portrait lock, overlay roll.
-- Tests: 36 JVM unit tests + 1 on-device benchmark (`androidTest`).
+- Tests: 68 JVM unit tests + on-device benchmarks (`androidTest`).
 
 ## Testing
 
-- JVM: `./gradlew testDebugUnitTest` (36 tests: PoseMath 9, GainCompensation 6,
+- JVM: `./gradlew testDebugUnitTest` (68 tests, see tasks/state/current-state.md; was 36: PoseMath 9, GainCompensation 6,
   YawRegistration 15 incl. real-photo texture / exposure drift / noise /
   30-photo three-row sweep, CoverageCrop 6).
 - Device: `./gradlew connectedDebugAndroidTest` on the Galaxy A12: 30 photos

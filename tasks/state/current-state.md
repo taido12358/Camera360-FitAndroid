@@ -2,9 +2,10 @@
 
 ## Project Phase
 
-FOUNDATION -> Camera360 capture/stitching working end to end on the emulator;
-manual (no-sensor) mode implemented for the real test phone but not yet
-verified with real photos.
+Camera360 works end to end on the emulator (guided mode) and in the accelerometer-only
+"manual mode" pipeline on synthetic ground truth and on the real test phone's
+hardware (timings, memory, sensors). **Not yet verified with real overlapping photos
+shot by a person on the test phone** - that is the one thing still missing.
 
 ## What this project is
 
@@ -14,33 +15,44 @@ docs/project/requirements.md.
 
 ## Implemented
 
-- Guided mode (devices with a rotation-vector sensor): 24-frame gyroscope-driven
-  capture, AR dot overlay (respects roll), auto-capture on sustained alignment,
-  pose-driven equirectangular stitching (parallel, bilinear, exposure/WB gain
-  compensation). Verified end to end on the emulator.
-- Manual mode (devices with only an accelerometer, e.g. the Galaxy A12 test
-  phone): free-form shots, gravity pitch/roll, heading from image registration,
-  crop to covered area. See tasks/active/current-task.md.
-- Portrait-locked activity; EXIF rotation applied when stitching.
-- 47 JVM unit tests + 1 on-device benchmark test.
+- **Guided mode** (phones with a rotation-vector sensor): 24-frame gyroscope-driven
+  capture, AR dot overlay (respects roll), auto-capture on sustained alignment;
+  sensor poses are sharpened by image registration (`PoseRefinement`, trusted
+  photos only, safe fallback); pose-driven rendering.
+- **Manual mode** (accelerometer only, e.g. the Galaxy A12 test phone; ADR-0002):
+  free-form shooting with live tilt/roll/steadiness feedback, gravity for pitch/roll,
+  heading by image registration (`YawRegistration`: NCC, voting placement, triangle
+  filter, robust solve, pitch correction, FOV self-calibration), coverage advice,
+  crop to covered area, per-session diagnostics file.
+- **Renderer** (`EquirectRenderer`, pure): frame culling, bilinear sampling,
+  exposure/white-balance gain compensation, blending.
+- In-app panorama viewer, safe "open in gallery" by Uri, keep-screen-on, portrait
+  lock, EXIF rotation, storage cleanup, OOM/IO error handling.
 
 ## Verified
 
-Guided mode + emulator: yes (emulator's virtual camera returns the same image for
-every pose, so seam/overlap quality is NOT assessable there).
-Manual mode: algorithm verified against synthetic ground truth and on-device
-timing (9 s for 30 photos on the A12); real-photo behaviour NOT verified.
+- 68 JVM unit tests (pose math, gain compensation, registration incl. real-photo
+  texture / exposure drift / noise / 30-photo sweep / random false-edge graphs,
+  renderer vs ground truth, end-to-end manual and guided-refinement pipelines,
+  crop/coverage/gravity/diagnostics) - all passing.
+- On the Galaxy A12 (instrumented tests): registration of 30 photos ~9 s, stitching
+  30 real-size (12 MP) photos ~13 s, peak Java heap 124 of 256 MB; real capture =
+  4000x3000 JPEG, EXIF orientation 6; measured FOV 69.6 deg matches the hardware
+  specs; accelerometer clean.
+- Emulator: full guided flow, viewer, Back handling, gallery open. Two independent
+  code-review rounds; all real findings fixed.
 
-## Known Issues
+## Known Issues / limits
 
-- Low-texture / repetitive scenes (plain walls, hazy windows, checkerboards) give
-  weak or wrong pair matches; the solver drops or misplaces a few photos there
-  (see docs/modules/camera360-stitching.md).
-- Manual mode result quality unknown until tested with real photos.
-- No CI/CD; connectedAndroidTest uninstalls the app from the device afterwards.
+- Manual mode quality on real photos unknown until a person shoots a sweep.
+- Low-texture / repetitive scenes (plain walls, hazy windows, checkerboards) give weak
+  or wrong pair matches; the solver drops or occasionally misplaces a few photos.
+- Emulator's virtual camera returns the same image for every pose: it cannot judge
+  seam/overlap quality.
+- No CI/CD; `connectedAndroidTest` uninstalls the app from the device afterwards.
 
 ## Next Priority
 
-Get real overlapping photos from the Galaxy A12 (user rotates the phone), inspect
-the panorama, and tune registration/blending on real data. Then: per-photo pitch
-correction from registration residuals, better blending (multi-band), export.
+Real overlapping photos from the Galaxy A12 (pull `files/frames/manual_*.jpg`, the
+panorama and `files/last_session_diagnostics.txt` with `adb run-as`), then tune on
+real data. Later: multi-band blending, export/sharing, sphere-coverage guidance.
