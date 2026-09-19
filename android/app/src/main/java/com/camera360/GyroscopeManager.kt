@@ -8,8 +8,6 @@ import android.hardware.SensorManager
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlin.math.asin
-import kotlin.math.atan2
 
 /**
  * [rotationMatrix] is the raw (unsmoothed) device→world rotation matrix from
@@ -52,11 +50,8 @@ class GyroscopeManager(context: Context) {
                 // exactly that upright pose. Camera-forward azimuth/elevation
                 // is well-defined, with 0° = horizon and +90° = straight up,
                 // which is what the frame targets and the AR overlay expect.
-                val fE = -rotMatrix[2].toDouble()
-                val fN = -rotMatrix[5].toDouble()
-                val fU = -rotMatrix[8].toDouble()
-                val rawAz = ((Math.toDegrees(atan2(fE, fN)).toFloat() + 360f) % 360f)
-                val rawPitch = Math.toDegrees(asin(fU.coerceIn(-1.0, 1.0))).toFloat()
+                val rawAz = PoseMath.azimuthDeg(rotMatrix)
+                val rawPitch = PoseMath.elevationDeg(rotMatrix)
 
                 if (smoothAz < 0f) {
                     smoothAz = rawAz

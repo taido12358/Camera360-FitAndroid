@@ -65,23 +65,8 @@ object StitchingEngine {
         val tanHalfVFov: Double
     )
 
-    /** Device axes assumed for the back camera: lens points out the -Z (screen) axis. */
-    private fun cameraBasisFromRotationMatrix(r: FloatArray): Triple<DoubleArray, DoubleArray, DoubleArray> {
-        // R maps device-frame vectors to world-frame: world = R * device.
-        // Right_world  = R * (1,0,0) = column 0 of R
-        // Up_world     = R * (0,1,0) = column 1 of R
-        // Fwd_world    = R * (0,0,-1) = -column 2 of R  (back lens points opposite the screen normal)
-        //
-        // The sensor's world frame is ENU (x=East, y=North, z=Up), but the
-        // projection loop below builds its world directions as
-        // (x=East, y=Up, z=North) — so swap components 1 and 2 of every basis
-        // vector, otherwise the panorama's vertical axis would map to North
-        // instead of Up.
-        val right = doubleArrayOf(r[0].toDouble(), r[6].toDouble(), r[3].toDouble())
-        val up = doubleArrayOf(r[1].toDouble(), r[7].toDouble(), r[4].toDouble())
-        val fwd = doubleArrayOf(-r[2].toDouble(), -r[8].toDouble(), -r[5].toDouble())
-        return Triple(right, up, fwd)
-    }
+    /** Camera basis in the stitcher world frame (E, Up, N) — see [PoseMath.stitchBasis]. */
+    private fun cameraBasisFromRotationMatrix(r: FloatArray) = PoseMath.stitchBasis(r)
 
     /**
      * Stitch [inputs] into an equirectangular JPEG at [outputFile], using

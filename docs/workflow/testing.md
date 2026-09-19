@@ -5,9 +5,10 @@ what exists today:
 
 ## Camera360 (native Android)
 
-- No test source set currently exists (`android/app/src/test` /
-  `androidTest` not present). `StitchingEngine` is pure Kotlin and is the
-  best first candidate for unit tests (see rules/testing/unit.md).
+- JVM unit tests exist for the pose math (`android/app/src/test`, 9 tests in
+  `PoseMathTest`; run `./gradlew testDebugUnitTest` in `android/`). No
+  `androidTest`, no StitchingEngine/CaptureViewModel tests yet (see
+  rules/testing/unit.md).
 - Manual QA is currently the only verification method — see
   rules/testing/manual-qa.md before merging capture/stitching changes.
 
