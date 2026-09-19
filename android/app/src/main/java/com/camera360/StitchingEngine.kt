@@ -3,8 +3,6 @@ package com.camera360
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.Matrix
-import android.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -38,6 +36,9 @@ object StitchingEngine {
     /** Max long-side for loaded frames to keep peak memory reasonable. */
     private const val MAX_FRAME_LONG_SIDE = 1024
 
+    /** Min. blend weight (0 = frame edge, 1 = centre) for a sample to count in gain estimation. */
+    private const val GAIN_MIN_WEIGHT = 0.25
+
     /**
      * One captured frame plus the device's exact orientation at capture time.
      *
@@ -62,7 +63,10 @@ object StitchingEngine {
         val up: DoubleArray,
         val fwd: DoubleArray,
         val tanHalfHFov: Double,
-        val tanHalfVFov: Double
+        val tanHalfVFov: Double,
+        // Per-channel exposure/white-balance gain (see estimateGains); filled in
+        // after all frames are loaded, 1.0 until then.
+        val gain: DoubleArray = doubleArrayOf(1.0, 1.0, 1.0)
     )
 
     /** Camera basis in the stitcher world frame (E, Up, N) — see [PoseMath.stitchBasis]. */
@@ -102,7 +106,7 @@ object StitchingEngine {
                 // CameraX stores the sensor-oriented pixels plus an EXIF rotation tag;
                 // BitmapFactory ignores the tag, so apply it here — the stitching basis
                 // (right = device +X, up = device +Y) assumes an upright portrait frame.
-                val bmp = applyExifRotation(decoded, exifRotationDegrees(input.file))
+                val bmp = ImageIo.applyExifRotation(decoded, ImageIo.exifRotationDegrees(input.file))
 
                 val sw = bmp.width; val sh = bmp.height
                 if (sw <= 0 || sh <= 0) { bmp.recycle(); return@mapNotNull null }
@@ -124,6 +128,12 @@ object StitchingEngine {
         }
 
         if (frames.isEmpty()) throw IllegalStateException("No frames could be loaded for stitching")
+
+        // Even out per-shot auto-exposure / white-balance differences before blending.
+        if (frames.size > 1) {
+            val gains = estimateGains(frames)
+            frames.forEachIndexed { i, fr -> for (c in 0 until 3) fr.gain[c] = gains[i][c] }
+        }
         onProgress(0.05f)
 
         // ── Inverse equirectangular projection ─────────────────────────────
@@ -163,6 +173,102 @@ object StitchingEngine {
         onProgress(1f)
     }
 
+    /**
+     * Samples [frame] in world direction ([wx],[wy],[wz]) (stitcher frame:
+     * East, Up, North). Returns the blend weight (0 if the frame does not see
+     * that direction) and writes the bilinearly interpolated RGB (0..255)
+     * into [rgb].
+     */
+    private fun sampleFrame(frame: FrameData, wx: Double, wy: Double, wz: Double, rgb: DoubleArray): Double {
+        // Project the world direction into this frame's camera space using its
+        // real orientation (right/up/fwd).
+        val camZ = wx * frame.fwd[0] + wy * frame.fwd[1] + wz * frame.fwd[2]
+        if (camZ <= 0.001) return 0.0   // behind this camera
+
+        val normX = (wx * frame.right[0] + wy * frame.right[1] + wz * frame.right[2]) / camZ
+        val normY = (wx * frame.up[0] + wy * frame.up[1] + wz * frame.up[2]) / camZ
+
+        val thH = frame.tanHalfHFov
+        val thV = frame.tanHalfVFov
+        if (abs(normX) >= thH || abs(normY) >= thV) return 0.0  // outside FOV
+
+        // Continuous frame pixel coordinates (top-left pixel centre = (0.5,0.5))
+        val fx = (normX / thH + 1.0) * 0.5 * frame.width - 0.5
+        val fy = (1.0 - (normY / thV + 1.0) * 0.5) * frame.height - 0.5
+
+        // Bilinear sample: avoids the blocky/aliased look of nearest-pixel.
+        val x0 = floor(fx).toInt().coerceIn(0, frame.width - 1)
+        val y0 = floor(fy).toInt().coerceIn(0, frame.height - 1)
+        val x1 = (x0 + 1).coerceAtMost(frame.width - 1)
+        val y1 = (y0 + 1).coerceAtMost(frame.height - 1)
+        val tx = (fx - x0).coerceIn(0.0, 1.0)
+        val ty = (fy - y0).coerceIn(0.0, 1.0)
+        val p = frame.pixels
+        val c00 = p[y0 * frame.width + x0]; val c10 = p[y0 * frame.width + x1]
+        val c01 = p[y1 * frame.width + x0]; val c11 = p[y1 * frame.width + x1]
+        val w00 = (1 - tx) * (1 - ty); val w10 = tx * (1 - ty)
+        val w01 = (1 - tx) * ty;       val w11 = tx * ty
+        rgb[0] = Color.red(c00) * w00 + Color.red(c10) * w10 + Color.red(c01) * w01 + Color.red(c11) * w11
+        rgb[1] = Color.green(c00) * w00 + Color.green(c10) * w10 + Color.green(c01) * w01 + Color.green(c11) * w11
+        rgb[2] = Color.blue(c00) * w00 + Color.blue(c10) * w10 + Color.blue(c01) * w01 + Color.blue(c11) * w11
+
+        // Cosine weight: full at frame center, zero at edges, for smooth blending
+        return (1.0 - abs(normX) / thH) * (1.0 - abs(normY) / thV)
+    }
+
+    /**
+     * Estimates a per-frame, per-channel exposure/white-balance gain (see
+     * [GainCompensation]) by sampling the sphere on a coarse grid and
+     * comparing every pair of frames that see the same direction. Only samples
+     * well inside both frames (blend weight >= [GAIN_MIN_WEIGHT]) are used, so
+     * lens vignetting at frame edges does not bias the estimate.
+     */
+    private fun estimateGains(frames: List<FrameData>): Array<DoubleArray> {
+        val n = frames.size
+        val gridW = 360
+        val gridH = 180
+        val count = Array(n) { DoubleArray(n) }
+        // sum[c][i][j]: frame i's channel-c value summed over the samples it shares with frame j
+        val sum = Array(3) { Array(n) { DoubleArray(n) } }
+
+        val rgb = Array(n) { DoubleArray(3) }
+        val hit = IntArray(n)
+        for (gy in 0 until gridH) {
+            val pitch = (0.5 - (gy + 0.5) / gridH) * PI
+            val cp = cos(pitch)
+            val wy = sin(pitch)
+            for (gx in 0 until gridW) {
+                val az = (gx + 0.5) / gridW * 2.0 * PI
+                val wx = cp * sin(az)
+                val wz = cp * cos(az)
+                var k = 0
+                for (i in 0 until n) {
+                    if (sampleFrame(frames[i], wx, wy, wz, rgb[k]) >= GAIN_MIN_WEIGHT) {
+                        hit[k] = i
+                        k++
+                    }
+                }
+                for (p in 0 until k) for (q in 0 until k) {
+                    if (p == q) continue
+                    val i = hit[p]
+                    val j = hit[q]
+                    count[i][j] += 1.0
+                    for (c in 0 until 3) sum[c][i][j] += rgb[p][c]
+                }
+            }
+        }
+
+        val gains = Array(n) { DoubleArray(3) { 1.0 } }
+        for (c in 0 until 3) {
+            val mean = Array(n) { i ->
+                DoubleArray(n) { j -> if (count[i][j] > 0.0) sum[c][i][j] / count[i][j] else 0.0 }
+            }
+            val g = GainCompensation.solve(count, mean)
+            for (i in 0 until n) gains[i][c] = g[i]
+        }
+        return gains
+    }
+
     /** Renders one output row into [out] (row [oy] of the equirectangular image). */
     private fun renderRow(
         oy: Int,
@@ -171,10 +277,11 @@ object StitchingEngine {
         cosAz: DoubleArray,
         out: IntArray
     ) {
-        // Equirectangular: top = +90° (zenith), bottom = -90° (nadir)
+        // Equirectangular: top = +90 deg (zenith), bottom = -90 deg (nadir)
         val worldPitch = (0.5 - (oy + 0.5) / OUT_H) * PI
         val cosPitch = cos(worldPitch)
         val wy = sin(worldPitch)
+        val rgb = DoubleArray(3)
 
         for (ox in 0 until OUT_W) {
             // Unit direction vector in world space (x=East, y=Up, z=North)
@@ -184,45 +291,11 @@ object StitchingEngine {
             var rAcc = 0.0; var gAcc = 0.0; var bAcc = 0.0; var wAcc = 0.0
 
             for (frame in frames) {
-                // Project the world direction into this frame's camera space
-                // using its real orientation (right/up/fwd), not a
-                // reconstructed-from-azimuth/pitch approximation.
-                val camZ = wx * frame.fwd[0] + wy * frame.fwd[1] + wz * frame.fwd[2]
-                if (camZ <= 0.001) continue   // behind this camera
-
-                val normX = (wx * frame.right[0] + wy * frame.right[1] + wz * frame.right[2]) / camZ
-                val normY = (wx * frame.up[0] + wy * frame.up[1] + wz * frame.up[2]) / camZ
-
-                val thH = frame.tanHalfHFov
-                val thV = frame.tanHalfVFov
-                if (abs(normX) >= thH || abs(normY) >= thV) continue  // outside FOV
-
-                // Continuous frame pixel coordinates (top-left pixel centre = (0.5,0.5))
-                val fx = (normX / thH + 1.0) * 0.5 * frame.width - 0.5
-                val fy = (1.0 - (normY / thV + 1.0) * 0.5) * frame.height - 0.5
-
-                // Bilinear sample — avoids the blocky/aliased look of nearest-pixel.
-                val x0 = floor(fx).toInt().coerceIn(0, frame.width - 1)
-                val y0 = floor(fy).toInt().coerceIn(0, frame.height - 1)
-                val x1 = (x0 + 1).coerceAtMost(frame.width - 1)
-                val y1 = (y0 + 1).coerceAtMost(frame.height - 1)
-                val tx = (fx - x0).coerceIn(0.0, 1.0)
-                val ty = (fy - y0).coerceIn(0.0, 1.0)
-                val p = frame.pixels
-                val c00 = p[y0 * frame.width + x0]; val c10 = p[y0 * frame.width + x1]
-                val c01 = p[y1 * frame.width + x0]; val c11 = p[y1 * frame.width + x1]
-                val w00 = (1 - tx) * (1 - ty); val w10 = tx * (1 - ty)
-                val w01 = (1 - tx) * ty;       val w11 = tx * ty
-                val r = Color.red(c00) * w00 + Color.red(c10) * w10 + Color.red(c01) * w01 + Color.red(c11) * w11
-                val g = Color.green(c00) * w00 + Color.green(c10) * w10 + Color.green(c01) * w01 + Color.green(c11) * w11
-                val b = Color.blue(c00) * w00 + Color.blue(c10) * w10 + Color.blue(c01) * w01 + Color.blue(c11) * w11
-
-                // Cosine weight: full at frame center, zero at edges — smooth blending
-                val weight = (1.0 - abs(normX) / thH) * (1.0 - abs(normY) / thV)
-
-                rAcc += r * weight
-                gAcc += g * weight
-                bAcc += b * weight
+                val weight = sampleFrame(frame, wx, wy, wz, rgb)
+                if (weight <= 0.0) continue
+                rAcc += rgb[0] * frame.gain[0] * weight
+                gAcc += rgb[1] * frame.gain[1] * weight
+                bAcc += rgb[2] * frame.gain[2] * weight
                 wAcc += weight
             }
 
@@ -234,25 +307,5 @@ object StitchingEngine {
                 )
             } else Color.BLACK
         }
-    }
-
-    /** EXIF rotation (clockwise degrees needed to display upright), 0 if unknown. */
-    private fun exifRotationDegrees(file: File): Int = try {
-        when (ExifInterface(file.absolutePath)
-            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270
-            else -> 0
-        }
-    } catch (e: Exception) { 0 }
-
-    /** Returns [bmp] rotated clockwise by [degrees]; recycles [bmp] if a copy was made. */
-    private fun applyExifRotation(bmp: Bitmap, degrees: Int): Bitmap {
-        if (degrees == 0) return bmp
-        val m = Matrix().apply { postRotate(degrees.toFloat()) }
-        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-        if (rotated !== bmp) bmp.recycle()
-        return rotated
     }
 }

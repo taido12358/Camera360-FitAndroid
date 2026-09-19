@@ -78,3 +78,21 @@ StateFlow), so values may arrive very slightly out of order.
 - Emulator caveat: the emulator's reported sensor size/focal length gives an
   unrealistically wide FOV (~104°), so overlay dot spacing and overlap on the
   emulator are not representative; real devices report real values.
+
+## Exposure / white-balance gain compensation (2026-09-19)
+
+Phones re-meter AE/AWB per shot, so neighbours can differ in brightness or
+tint. `StitchingEngine.estimateGains` samples the sphere on a 360x180 grid,
+and for every pair of frames that both see a direction well inside their
+frame (blend weight >= 0.25, to dodge vignetting) accumulates the overlap
+statistics. `GainCompensation.solve` (Brown & Lowe 2007, sec. 6; pure Kotlin,
+JVM-tested in `GainCompensationTest`) then finds one gain per frame and colour
+channel minimising the overlap mismatch, with a prior pulling gains to 1
+(sigma_g = 0.25), clamped to [0.6, 1.7] and re-centred on a mean of 1 so the
+panorama cannot get globally darker/brighter. Frames with no overlap keep 1.0.
+
+Verification status: solver unit-tested; runs end-to-end on the emulator
+(38 s, no errors). NOT visually verified on real overlapping data — the
+emulator returns the same image for every pose, which makes the overlaps
+geometrically inconsistent (it produced a darker panorama, an artefact of
+that data). Check on a real device that seams between shots visibly even out.
