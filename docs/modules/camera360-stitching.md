@@ -230,3 +230,11 @@ rendered 720x360 panorama with the true sphere per pixel:
   compensation (previously only eyeballed);
 - blend sharpness `blendPower` with 0.6 deg yaw error: 0.5 -> 2.49, 1 -> 2.61,
   2 -> 2.76, 4 -> 2.89 (softer hides small pose errors slightly better; kept 1.0).
+
+### End-to-end manual pipeline test (2026-09-20)
+
+`ManualPipelineTest`: 30 hand-held-style photos (jittered spacing, +-1 deg
+accelerometer pitch error, +-15 % per-channel exposure drift) of a coloured
+textured sphere -> `YawRegistration` -> poses -> `EquirectRenderer` -> per-pixel
+comparison with the true sphere. Result: 30/30 photos placed; RMSE **7.59 ->
+5.11 / 255** with the pitch correction (exact poses give ~1).
