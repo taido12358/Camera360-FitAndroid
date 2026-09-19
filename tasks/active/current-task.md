@@ -57,7 +57,7 @@ Camera360 (native Android) — capture + stitching.
 
 ## Testing
 
-**Not done.** No network access in this environment to fetch Gradle/
+**Update 2026-09-19:** built and run on the emulator (see logs/ai-agent/sessions/2026/09/2026-09-19-session-004.md). Original note: no network access in this environment to fetch Gradle/
 dependencies, so the build could not be compiled or run here. Manually
 reviewed all changed files for type/logic correctness (see
 logs/ai-agent/sessions/2026/09/2026-09-10-session-003.md), but this has
@@ -72,4 +72,4 @@ Updated as listed in Scope above.
 
 ## Status
 
-IMPLEMENTED (not TESTED, not VERIFIED — see Testing above)
+PARTIALLY TESTED on emulator 2026-09-19 (full 24-frame auto/manual capture + stitch runs end-to-end, panorama written to DCIM/Camera360; two axis bugs found and fixed). NOT verified on a real device — emulator feeds the same image for every pose, so overlap/seam accuracy is unverified.
