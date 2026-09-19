@@ -49,3 +49,13 @@ safe to unit test in isolation (see rules/testing/unit.md).
   system's sensor fusion) and (b) `hFovDeg` matching the real lens. Do not
   "fix" seams by tweaking the blend weights before checking those two
   first.
+
+## Renderer: parallel + bilinear (2026-09-19)
+
+`StitchingEngine.stitch` renders output rows in parallel (interleaved row
+sets across up to 8 `Dispatchers.Default` workers, see `renderRow`), samples
+source frames bilinearly instead of nearest-pixel, and reuses per-column
+sin/cos tables. On the emulator this took the 24-frame stitch from ~50 s to
+~26 s. Output pixels are identical in geometry; only sampling smoothness
+changed. `onProgress` is now called from worker threads (still safe for a
+StateFlow), so values may arrive very slightly out of order.

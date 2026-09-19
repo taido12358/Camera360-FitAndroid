@@ -4,8 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.*
 
 /**
@@ -128,69 +132,28 @@ object StitchingEngine {
         onProgress(0.05f)
 
         // ── Inverse equirectangular projection ─────────────────────────────
-        val outPixels = IntArray(OUT_W * OUT_H) { Color.BLACK }
+        val outPixels = IntArray(OUT_W * OUT_H)
 
-        for (oy in 0 until OUT_H) {
-            // Equirectangular: top = +90° (zenith), bottom = -90° (nadir)
-            val worldPitch = (0.5 - oy.toDouble() / OUT_H) * PI
-            val cosPitch = cos(worldPitch)
-            val sinPitch = sin(worldPitch)
+        // sin/cos of each output column's azimuth are the same for every row.
+        val sinAz = DoubleArray(OUT_W) { sin(it.toDouble() / OUT_W * 2.0 * PI) }  // 0..2π
+        val cosAz = DoubleArray(OUT_W) { cos(it.toDouble() / OUT_W * 2.0 * PI) }
 
-            for (ox in 0 until OUT_W) {
-                val worldAz = ox.toDouble() / OUT_W * 2.0 * PI  // 0..2π (left = west)
+        val rowsDone = AtomicInteger(0)
+        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
 
-                // Unit direction vector in world space
-                val wx = cosPitch * sin(worldAz)
-                val wy = sinPitch
-                val wz = cosPitch * cos(worldAz)
-
-                var rAcc = 0.0; var gAcc = 0.0; var bAcc = 0.0; var wAcc = 0.0
-
-                frames.forEach { frame ->
-                    // Project the world direction into this frame's camera space
-                    // using its real orientation (right/up/fwd), not a
-                    // reconstructed-from-azimuth/pitch approximation.
-                    val camX = wx * frame.right[0] + wy * frame.right[1] + wz * frame.right[2]
-                    val camY = wx * frame.up[0] + wy * frame.up[1] + wz * frame.up[2]
-                    val camZ = wx * frame.fwd[0] + wy * frame.fwd[1] + wz * frame.fwd[2]
-
-                    if (camZ <= 0.001) return@forEach   // behind this camera
-
-                    val normX = camX / camZ   // rectilinear projection
-                    val normY = camY / camZ
-
-                    val thH = frame.tanHalfHFov
-                    val thV = frame.tanHalfVFov
-
-                    if (abs(normX) >= thH || abs(normY) >= thV) return@forEach  // outside FOV
-
-                    // Frame pixel coordinates (top-left = (0,0))
-                    val pixX = ((normX / thH + 1.0) * 0.5 * frame.width)
-                        .toInt().coerceIn(0, frame.width - 1)
-                    val pixY = ((1.0 - (normY / thV + 1.0) * 0.5) * frame.height)
-                        .toInt().coerceIn(0, frame.height - 1)
-
-                    val color = frame.pixels[pixY * frame.width + pixX]
-
-                    // Cosine weight: full at frame center, zero at edges — smooth blending
-                    val weight = (1.0 - abs(normX) / thH) * (1.0 - abs(normY) / thV)
-
-                    rAcc += Color.red(color)   * weight
-                    gAcc += Color.green(color) * weight
-                    bAcc += Color.blue(color)  * weight
-                    wAcc += weight
+        // Rows are independent, so render interleaved row sets in parallel.
+        coroutineScope {
+            (0 until workers).map { w ->
+                async(Dispatchers.Default) {
+                    var oy = w
+                    while (oy < OUT_H) {
+                        renderRow(oy, frames, sinAz, cosAz, outPixels)
+                        val done = rowsDone.incrementAndGet()
+                        if (done % 48 == 0) onProgress(0.05f + 0.90f * done.toFloat() / OUT_H)
+                        oy += workers
+                    }
                 }
-
-                outPixels[oy * OUT_W + ox] = if (wAcc > 0.0) {
-                    Color.rgb(
-                        (rAcc / wAcc).toInt().coerceIn(0, 255),
-                        (gAcc / wAcc).toInt().coerceIn(0, 255),
-                        (bAcc / wAcc).toInt().coerceIn(0, 255)
-                    )
-                } else Color.BLACK
-            }
-
-            if (oy % 48 == 0) onProgress(0.05f + 0.90f * (oy + 1).toFloat() / OUT_H)
+            }.awaitAll()
         }
 
         // ── Write output JPEG ───────────────────────────────────────────────
@@ -203,5 +166,78 @@ object StitchingEngine {
         }
         outBmp.recycle()
         onProgress(1f)
+    }
+
+    /** Renders one output row into [out] (row [oy] of the equirectangular image). */
+    private fun renderRow(
+        oy: Int,
+        frames: List<FrameData>,
+        sinAz: DoubleArray,
+        cosAz: DoubleArray,
+        out: IntArray
+    ) {
+        // Equirectangular: top = +90° (zenith), bottom = -90° (nadir)
+        val worldPitch = (0.5 - (oy + 0.5) / OUT_H) * PI
+        val cosPitch = cos(worldPitch)
+        val wy = sin(worldPitch)
+
+        for (ox in 0 until OUT_W) {
+            // Unit direction vector in world space (x=East, y=Up, z=North)
+            val wx = cosPitch * sinAz[ox]
+            val wz = cosPitch * cosAz[ox]
+
+            var rAcc = 0.0; var gAcc = 0.0; var bAcc = 0.0; var wAcc = 0.0
+
+            for (frame in frames) {
+                // Project the world direction into this frame's camera space
+                // using its real orientation (right/up/fwd), not a
+                // reconstructed-from-azimuth/pitch approximation.
+                val camZ = wx * frame.fwd[0] + wy * frame.fwd[1] + wz * frame.fwd[2]
+                if (camZ <= 0.001) continue   // behind this camera
+
+                val normX = (wx * frame.right[0] + wy * frame.right[1] + wz * frame.right[2]) / camZ
+                val normY = (wx * frame.up[0] + wy * frame.up[1] + wz * frame.up[2]) / camZ
+
+                val thH = frame.tanHalfHFov
+                val thV = frame.tanHalfVFov
+                if (abs(normX) >= thH || abs(normY) >= thV) continue  // outside FOV
+
+                // Continuous frame pixel coordinates (top-left pixel centre = (0.5,0.5))
+                val fx = (normX / thH + 1.0) * 0.5 * frame.width - 0.5
+                val fy = (1.0 - (normY / thV + 1.0) * 0.5) * frame.height - 0.5
+
+                // Bilinear sample — avoids the blocky/aliased look of nearest-pixel.
+                val x0 = floor(fx).toInt().coerceIn(0, frame.width - 1)
+                val y0 = floor(fy).toInt().coerceIn(0, frame.height - 1)
+                val x1 = (x0 + 1).coerceAtMost(frame.width - 1)
+                val y1 = (y0 + 1).coerceAtMost(frame.height - 1)
+                val tx = (fx - x0).coerceIn(0.0, 1.0)
+                val ty = (fy - y0).coerceIn(0.0, 1.0)
+                val p = frame.pixels
+                val c00 = p[y0 * frame.width + x0]; val c10 = p[y0 * frame.width + x1]
+                val c01 = p[y1 * frame.width + x0]; val c11 = p[y1 * frame.width + x1]
+                val w00 = (1 - tx) * (1 - ty); val w10 = tx * (1 - ty)
+                val w01 = (1 - tx) * ty;       val w11 = tx * ty
+                val r = Color.red(c00) * w00 + Color.red(c10) * w10 + Color.red(c01) * w01 + Color.red(c11) * w11
+                val g = Color.green(c00) * w00 + Color.green(c10) * w10 + Color.green(c01) * w01 + Color.green(c11) * w11
+                val b = Color.blue(c00) * w00 + Color.blue(c10) * w10 + Color.blue(c01) * w01 + Color.blue(c11) * w11
+
+                // Cosine weight: full at frame center, zero at edges — smooth blending
+                val weight = (1.0 - abs(normX) / thH) * (1.0 - abs(normY) / thV)
+
+                rAcc += r * weight
+                gAcc += g * weight
+                bAcc += b * weight
+                wAcc += weight
+            }
+
+            out[oy * OUT_W + ox] = if (wAcc > 0.0) {
+                Color.rgb(
+                    (rAcc / wAcc).toInt().coerceIn(0, 255),
+                    (gAcc / wAcc).toInt().coerceIn(0, 255),
+                    (bAcc / wAcc).toInt().coerceIn(0, 255)
+                )
+            } else Color.BLACK
+        }
     }
 }
