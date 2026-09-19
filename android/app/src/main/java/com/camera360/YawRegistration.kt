@@ -51,6 +51,9 @@ object YawRegistration {
     private const val MIN_OVERLAP_FRACTION = 0.15
     private const val MIN_OVERLAP_CELLS = 40
 
+    /** Coarse shifts whose azimuth footprints share fewer columns than this are not even evaluated. */
+    private const val MIN_SHARED_COLUMNS = 4
+
     /** Fine-stage overlap floor (1 deg cells): ~12x12 deg of shared scene. */
     private const val MIN_FINE_CELLS = 150
 
@@ -117,9 +120,11 @@ object YawRegistration {
         fun sample(azDeg: Double, elDeg: Double): Float {
             val az = Math.toRadians(azDeg)
             val el = Math.toRadians(elDeg)
-            val dE = cos(el) * sin(az)
-            val dN = cos(el) * cos(az)
-            val dU = sin(el)
+            return sampleDir(cos(el) * sin(az), cos(el) * cos(az), sin(el))
+        }
+
+        /** Same, for a unit direction given as world (east, north, up) components — no trigonometry. */
+        fun sampleDir(dE: Double, dN: Double, dU: Double): Float {
             val devX = r[0] * dE + r[3] * dN + r[6] * dU
             val devY = r[1] * dE + r[4] * dN + r[7] * dU
             val devZ = r[2] * dE + r[5] * dN + r[8] * dU
@@ -171,15 +176,21 @@ object YawRegistration {
         return out
     }
 
-    private class Grid(val step: Double, val nAz: Int, val nEl: Int, val v: FloatArray)
+    private class Grid(val step: Double, val nAz: Int, val nEl: Int, val v: FloatArray) {
+        /** colValid[k]: any elevation of azimuth column k is visible in this photo. */
+        val colValid = BooleanArray(nAz) { k -> (0 until nEl).any { m -> !v[m * nAz + k].isNaN() } }
+    }
 
     private fun project(s: Sampler, step: Double): Grid {
         val nAz = (360.0 / step).roundToInt()
         val nEl = (2 * MAX_ELEVATION_DEG / step).toInt() + 1
         val v = FloatArray(nAz * nEl)
+        val sinAz = DoubleArray(nAz) { sin(Math.toRadians(-180.0 + it * step)) }
+        val cosAz = DoubleArray(nAz) { cos(Math.toRadians(-180.0 + it * step)) }
         for (m in 0 until nEl) {
-            val el = -MAX_ELEVATION_DEG + m * step
-            for (k in 0 until nAz) v[m * nAz + k] = s.sample(-180.0 + k * step, el)
+            val el = Math.toRadians(-MAX_ELEVATION_DEG + m * step)
+            val ce = cos(el); val se = sin(el)
+            for (k in 0 until nAz) v[m * nAz + k] = s.sampleDir(ce * sinAz[k], ce * cosAz[k], se)
         }
         return Grid(step, nAz, nEl, v)
     }
@@ -223,9 +234,15 @@ object YawRegistration {
             rowBase[c] = m * nAz; col[c] = k; bv[c] = b; c++
         }
 
+        // Only shifts where the two photos' azimuth footprints actually intersect can overlap; a portrait
+        // photo spans ~1/7 of the circle, so this skips most shifts outright.
+        val jCols = (0 until nAz).filter { gj.colValid[it] }.toIntArray()
         val acc = Accum()
         val scores = DoubleArray(nAz) { -2.0 }
         for (shift in 0 until nAz) {
+            var shared = 0
+            for (k in jCols) { var kk = k + shift; if (kk >= nAz) kk -= nAz; if (gi.colValid[kk]) shared++ }
+            if (shared < MIN_SHARED_COLUMNS) continue
             acc.reset()
             for (t in 0 until cnt) {
                 var kk = col[t] + shift; if (kk >= nAz) kk -= nAz
@@ -250,21 +267,45 @@ object YawRegistration {
         return Coarse(wrap180(bestShift * gj.step), bestNcc, bestCells, runnerUp)
     }
 
-    private class Cell(val az: Double, val el: Double, val value: Float)
+    /**
+     * Photo j's visible cells on the fine grid, as unit directions (east, north, up), cos(elevation) and
+     * value. [sparse] is every second cell in both directions (1/4 of them): the first stages of the
+     * refinement search run on it, and only the last few evaluations pay for the full set.
+     */
+    private class Cells(
+        val dE: DoubleArray, val dN: DoubleArray, val dU: DoubleArray, val ch: DoubleArray, val value: FloatArray,
+        sparseOf: (Cells) -> Cells?
+    ) {
+        val size: Int get() = value.size
+        val sparse: Cells? = sparseOf(this)
+    }
 
-    private fun cellsOf(sampler: Sampler): List<Cell> {
-        val out = ArrayList<Cell>()
-        var el = -MAX_ELEVATION_DEG
-        while (el <= MAX_ELEVATION_DEG) {
-            var az = -180.0
-            while (az < 180.0) {
-                val v = sampler.sample(az, el)
-                if (!v.isNaN()) out.add(Cell(az, el, v))
-                az += FINE_STEP_DEG
+    private fun cellsOf(sampler: Sampler): Cells {
+        val nAz = (360.0 / FINE_STEP_DEG).roundToInt()
+        val nEl = (2 * MAX_ELEVATION_DEG / FINE_STEP_DEG).toInt() + 1
+        val sinAz = DoubleArray(nAz) { sin(Math.toRadians(-180.0 + it * FINE_STEP_DEG)) }
+        val cosAz = DoubleArray(nAz) { cos(Math.toRadians(-180.0 + it * FINE_STEP_DEG)) }
+        val e = ArrayList<Double>(); val n = ArrayList<Double>(); val u = ArrayList<Double>()
+        val c = ArrayList<Double>(); val v = ArrayList<Float>(); val isSparse = ArrayList<Boolean>()
+        for (m in 0 until nEl) {
+            val el = Math.toRadians(-MAX_ELEVATION_DEG + m * FINE_STEP_DEG)
+            val ce = cos(el); val se = sin(el)
+            for (k in 0 until nAz) {
+                val dE = ce * sinAz[k]; val dN = ce * cosAz[k]
+                val value = sampler.sampleDir(dE, dN, se)
+                if (value.isNaN()) continue
+                e.add(dE); n.add(dN); u.add(se); c.add(ce); v.add(value)
+                isSparse.add(m % 2 == 0 && k % 2 == 0)
             }
-            el += FINE_STEP_DEG
         }
-        return out
+        val idx = isSparse.indices.filter { isSparse[it] }.toIntArray()
+        return Cells(e.toDoubleArray(), n.toDoubleArray(), u.toDoubleArray(), c.toDoubleArray(), v.toFloatArray()) { full ->
+            Cells(
+                DoubleArray(idx.size) { full.dE[idx[it]] }, DoubleArray(idx.size) { full.dN[idx[it]] },
+                DoubleArray(idx.size) { full.dU[idx[it]] }, DoubleArray(idx.size) { full.ch[idx[it]] },
+                FloatArray(idx.size) { full.value[idx[it]] }
+            ) { null }
+        }
     }
 
     /**
@@ -272,50 +313,69 @@ object YawRegistration {
      * sub-degree shifts. Gravity is only good to a degree or so (accelerometer noise, hand
      * tremor), so the two photos' levelling can disagree slightly; a small *vertical* offset is
      * therefore searched too (coordinate descent: horizontal → vertical → horizontal), which keeps
-     * the correlation from collapsing on fine texture. Returns (Δ, NCC, cells).
+     * the correlation from collapsing on fine texture. Most of the search runs on the sparse cell
+     * set (4x cheaper); the last evaluations use all cells. Returns (Δ, NCC, cells).
      */
-    private fun refine(si: Sampler, jCells: List<Cell>, coarseDeg: Double): Triple<Double, Double, Int> {
+    private fun refine(si: Sampler, jCells: Cells, coarseDeg: Double): Triple<Double, Double, Int> {
         val acc = Accum()
 
-        fun score(d: Double, dv: Double): Double {
+        // Direction of each of j's cells after a yaw shift d (rotation about the vertical axis) and an
+        // elevation shift dv, without calling sin/cos per cell.
+        fun accumulate(cells: Cells, d: Double, dv: Double) {
             acc.reset()
-            for (c in jCells) {
-                val a = si.sample(c.az + d, c.el + dv)
-                if (!a.isNaN()) acc.add(a, c.value)
+            val cd = cos(Math.toRadians(d)); val sd = sin(Math.toRadians(d))
+            val cv = cos(Math.toRadians(dv)); val sv = sin(Math.toRadians(dv))
+            for (t in 0 until cells.size) {
+                val e1 = cells.dE[t] * cd + cells.dN[t] * sd
+                val n1 = cells.dN[t] * cd - cells.dE[t] * sd
+                val u0 = cells.dU[t]
+                val ch = cells.ch[t]
+                val a = if (ch < 1e-6 || dv == 0.0) {
+                    si.sampleDir(e1, n1, u0)
+                } else {
+                    val k = u0 * sv / ch
+                    si.sampleDir(e1 * cv - e1 * k, n1 * cv - n1 * k, u0 * cv + ch * sv)
+                }
+                if (!a.isNaN()) acc.add(a, cells.value[t])
             }
-            return if (acc.n >= MIN_FINE_CELLS) acc.ncc() else -2.0
         }
 
+        val sparse = jCells.sparse ?: jCells
+        val sparseFloor = if (sparse === jCells) MIN_FINE_CELLS else MIN_FINE_CELLS / 4
+
         var bestD = coarseDeg; var bestV = 0.0; var bestNcc = -2.0
-        fun scanHorizontal(center: Double, half: Double, step: Double) {
+        fun scanHorizontal(cells: Cells, floor: Int, center: Double, half: Double, step: Double) {
             var d = center - half
             while (d <= center + half + 1e-9) {
-                val s = score(d, bestV)
+                accumulate(cells, d, bestV)
+                val s = if (acc.n >= floor) acc.ncc() else -2.0
                 if (s > bestNcc) { bestNcc = s; bestD = d }
                 d += step
             }
         }
-        fun scanVertical(half: Double, step: Double) {
+        fun scanVertical(cells: Cells, floor: Int, half: Double, step: Double) {
             val center = bestV
             var v = center - half
             while (v <= center + half + 1e-9) {
-                val s = score(bestD, v)
+                accumulate(cells, bestD, v)
+                val s = if (acc.n >= floor) acc.ncc() else -2.0
                 if (s > bestNcc) { bestNcc = s; bestV = v }
                 v += step
             }
         }
 
-        scanHorizontal(coarseDeg, REFINE_HALF_RANGE_DEG, REFINE_STEP_DEG)
-        scanVertical(VERTICAL_HALF_RANGE_DEG, 0.5)
-        scanHorizontal(bestD, 0.75, REFINE_STEP_DEG)
-        scanVertical(0.5, 0.25)
-        scanHorizontal(bestD, 0.5, REFINE_STEP_DEG)
+        // Stage A: wide search on the sparse set.
+        scanHorizontal(sparse, sparseFloor, coarseDeg, REFINE_HALF_RANGE_DEG, REFINE_STEP_DEG)
+        scanVertical(sparse, sparseFloor, VERTICAL_HALF_RANGE_DEG, 0.5)
+        scanHorizontal(sparse, sparseFloor, bestD, 0.75, REFINE_STEP_DEG)
 
-        acc.reset()
-        for (c in jCells) {
-            val a = si.sample(c.az + bestD, c.el + bestV)
-            if (!a.isNaN()) acc.add(a, c.value)
-        }
+        // Stage B: polish on every cell (scores are re-measured, so restart the running best).
+        bestNcc = -2.0
+        scanHorizontal(jCells, MIN_FINE_CELLS, bestD, 0.5, REFINE_STEP_DEG)
+        scanVertical(jCells, MIN_FINE_CELLS, 0.5, 0.25)
+        scanHorizontal(jCells, MIN_FINE_CELLS, bestD, 0.25, REFINE_STEP_DEG)
+
+        accumulate(jCells, bestD, bestV)
         return Triple(bestD, bestNcc, acc.n)
     }
 
@@ -326,25 +386,49 @@ object YawRegistration {
      * field of view along the sensor's long side is [longSideFovDeg]) and solves
      * for each frame's heading relative to frame 0.
      */
-    fun estimateHeadings(frames: List<GrayFrame>, longSideFovDeg: Double, minNcc: Double = MIN_NCC): Result {
+    fun estimateHeadings(
+        frames: List<GrayFrame>,
+        longSideFovDeg: Double,
+        minNcc: Double = MIN_NCC,
+        /** Optional sink for a one-line per-phase timing summary (diagnostics / benchmarks). */
+        onTiming: ((String) -> Unit)? = null
+    ): Result {
         val n = frames.size
         if (n == 0) return Result(DoubleArray(0), emptyList(), emptyList())
 
+        var t = System.nanoTime()
+        fun lap(): Long { val now = System.nanoTime(); val d = (now - t) / 1_000_000; t = now; return d }
+
         val samplers = frames.map { Sampler(it, highPass(it), longSideFovDeg) }
+        val prepMs = lap()
         val coarse = samplers.map { project(it, COARSE_STEP_DEG) }
+        val projectMs = lap()
 
         val pairs = ArrayList<PairMatch>()
-        val cellCache = HashMap<Int, List<Cell>>()
+        val cellCache = HashMap<Int, Cells>()
+        var coarseMs = 0L; var cellsMs = 0L; var refineMs = 0L; var refined = 0
         for (i in 0 until n) for (j in i + 1 until n) {
-            val c = coarseMatch(coarse[i], coarse[j], min(MIN_COARSE_NCC, minNcc)) ?: continue
+            lap()
+            val c = coarseMatch(coarse[i], coarse[j], min(MIN_COARSE_NCC, minNcc))
+            coarseMs += lap()
+            if (c == null) continue
             // A weak correlation is only believable if the peak clearly stands out from every other shift
             // (repetitive textures - blinds, tiles - produce many similar peaks).
             if (c.ncc < CONFIDENT_NCC && c.ncc - c.runnerUpNcc < MIN_PEAK_MARGIN && minNcc > 0.0) continue
             val jCells = cellCache.getOrPut(j) { cellsOf(samplers[j]) }
+            cellsMs += lap()
             val (delta, ncc, cells) = refine(samplers[i], jCells, c.deltaDeg)
+            refineMs += lap(); refined++
             if (ncc >= minNcc) pairs.add(PairMatch(i, j, wrap180(delta), ncc, cells, c.ncc - c.runnerUpNcc))
         }
-        return solve(n, pairs)
+        lap()
+        val result = solve(n, pairs)
+        val solveMs = lap()
+        onTiming?.invoke(
+            "prep=${prepMs}ms project=${projectMs}ms coarse=${coarseMs}ms cells=${cellsMs}ms " +
+                "refine=${refineMs}ms($refined pairs) solve=${solveMs}ms"
+        )
+        return result
     }
 
     /**

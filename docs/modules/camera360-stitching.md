@@ -175,3 +175,16 @@ contain all covered pixels, ignoring a few stray fringe pixels. Uncovered pixels
 are marked internally (alpha 0) and only turned black at the end. Guided
 24-frame mode keeps the full 2:1 frame (standard for 360 photo viewers).
 Verified on the emulator (temporarily enabled for the guided path: 3840x1869).
+
+### Performance on the real test phone (2026-09-20)
+
+Measured with an instrumented test on the Galaxy A12
+(`YawRegistrationDeviceTest`, run `./gradlew connectedDebugAndroidTest` with the
+phone attached; logs per-phase timings under tag `YawRegDevice`):
+30 photos (3 rows, 435 pairs) registered in **21.9 s -> 9.0 s** after
+optimisation. Phases (after): prep 0.24 s, project 0.23 s, coarse match 1.6 s,
+cells 0.7 s, refine 5.9 s (154 pairs), solve 0.1 s. Changes: direction vectors
+and yaw/elevation rotation formulas instead of sin/cos per sample; refinement
+runs on a 1/4 sparse cell set, full set only for the last polish steps; coarse
+match skips shifts whose azimuth footprints cannot intersect. The same JVM
+workload takes ~2 s, i.e. this phone is ~4-5x slower than the dev machine.
