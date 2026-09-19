@@ -60,3 +60,12 @@ only, not the flow itself.
   alignment before firing — tune both together if capture feels too eager
   or too slow; don't change one without checking the other's effect on
   false-trigger rate.
+
+## AR overlay uses the full rotation matrix (2026-09-19)
+
+`SphereGuideOverlay` projects dots with `projectToScreenWithMatrix` (full
+device→world rotation matrix, same right/up/-forward convention as
+`StitchingEngine`), so phone roll is respected — dots and the per-row level
+lines rotate with the phone. The az/pitch-only `projectToScreen` is now only
+a fallback when no matrix has arrived yet. Verified on emulator with a 30°
+roll pose (`scratchpad` pose script: accel+mag).

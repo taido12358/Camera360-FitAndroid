@@ -112,6 +112,58 @@ private fun projectToScreen(
 }
 
 /**
+ * Same projection as [projectToScreen], but the camera pose is the device's
+ * full device→world rotation matrix ([r], row-major, ENU world frame) instead
+ * of an azimuth/pitch pair — so phone roll is respected and the overlay dots
+ * stay glued to the real scene when the phone is tilted sideways. Uses the
+ * same basis convention as StitchingEngine (right = column 0, up = column 1,
+ * forward = -column 2 of R).
+ */
+private fun projectToScreenWithMatrix(
+    targetAz: Float, targetPitch: Float,
+    r: FloatArray,
+    screenW: Float, screenH: Float,
+    hFovDeg: Double
+): Offset? {
+    val taz = Math.toRadians(targetAz.toDouble())
+    val tp  = Math.toRadians(targetPitch.toDouble())
+    // ENU: x = East, y = North, z = Up
+    val e = cos(tp) * sin(taz)
+    val n = cos(tp) * cos(taz)
+    val u = sin(tp)
+
+    val camX = e * r[0] + n * r[3] + u * r[6]
+    val camY = e * r[1] + n * r[4] + u * r[7]
+    val camZ = -(e * r[2] + n * r[5] + u * r[8])
+
+    if (camZ <= 0.01) return null   // behind camera
+
+    val focalLen = (screenW / 2.0) / tan(Math.toRadians(hFovDeg / 2.0))
+    val sx = (screenW / 2.0 + focalLen * camX / camZ).toFloat()
+    val sy = (screenH / 2.0 - focalLen * camY / camZ).toFloat()
+    return Offset(sx, sy)
+}
+
+/** Projects with the full rotation matrix when available, else az/pitch only. */
+private fun projectTarget(
+    targetAz: Float, targetPitch: Float,
+    state: CaptureState,
+    screenW: Float, screenH: Float,
+    hFovDeg: Double
+): Offset? {
+    val r = state.currentRotationMatrix
+    return if (r != null) {
+        projectToScreenWithMatrix(targetAz, targetPitch, r, screenW, screenH, hFovDeg)
+    } else {
+        projectToScreen(
+            targetAz, targetPitch,
+            state.currentAzimuth, state.currentPitch,
+            screenW, screenH, hFovDeg
+        )
+    }
+}
+
+/**
  * Reads the bound back camera's real horizontal FOV from its
  * [CameraCharacteristics] (focal length + physical sensor size) instead of
  * relying on [StitchingEngine.CAMERA_HFOV_DEG]'s hardcoded assumption — this
@@ -412,17 +464,16 @@ private fun SphereGuideOverlay(
         val nearestIdx = state.nearestUncapturedIndex
         val hFov = state.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
 
-        // Faint horizontal level lines at each row's pitch angle
+        // Faint level lines at each row's pitch angle. Two points on the row,
+        // ±40° either side of the camera's heading, so the line tilts with
+        // phone roll instead of always being drawn horizontally.
         listOf(-35f, 0f, 35f).forEach { rowPitch ->
-            val screenY = projectToScreen(
-                state.currentAzimuth, rowPitch,       // same az as camera, different pitch
-                state.currentAzimuth, state.currentPitch,
-                w, h, hFov
-            )?.y ?: return@forEach
-            if (screenY in 0f..h) {
+            val left = projectTarget(state.currentAzimuth - 40f, rowPitch, state, w, h, hFov)
+            val right = projectTarget(state.currentAzimuth + 40f, rowPitch, state, w, h, hFov)
+            if (left != null && right != null) {
                 drawLine(
                     Color.White.copy(alpha = 0.10f),
-                    Offset(0f, screenY), Offset(w, screenY),
+                    left, right,
                     strokeWidth = 1.dp.toPx()
                 )
             }
@@ -430,10 +481,9 @@ private fun SphereGuideOverlay(
 
         // Draw each of the 24 world-fixed frame dots
         state.frames.forEach { frame ->
-            val pos = projectToScreen(
+            val pos = projectTarget(
                 frame.azimuth, frame.pitch,
-                state.currentAzimuth, state.currentPitch,
-                w, h, hFov
+                state, w, h, hFov
             ) ?: return@forEach   // null = behind camera; skip
 
             val x = pos.x; val y = pos.y
