@@ -45,6 +45,15 @@ object ImageIo {
         val decoded = BitmapFactory.decodeFile(
             file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample }
         ) ?: return null
-        return applyExifRotation(decoded, exifRotationDegrees(file))
+        val upright = applyExifRotation(decoded, exifRotationDegrees(file))
+        // inSampleSize only takes powers of two (1280 px with a 960 px target stays 1280), so finish exactly.
+        val longest = maxOf(upright.width, upright.height)
+        if (longest <= maxLongSide * 1.1) return upright
+        val scale = maxLongSide.toDouble() / longest
+        val scaled = Bitmap.createScaledBitmap(
+            upright, maxOf(1, (upright.width * scale).toInt()), maxOf(1, (upright.height * scale).toInt()), true
+        )
+        if (scaled !== upright) upright.recycle()
+        return scaled
     }
 }

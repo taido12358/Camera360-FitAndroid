@@ -460,6 +460,15 @@ class CaptureViewModel : ViewModel() {
                         fovNote
                     ).joinToString("\n").ifEmpty { null }
                 )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                // Not an Exception: without this the UI would stay on "stitching" forever.
+                Log.e("CaptureVM", "Manual stitching ran out of memory", e)
+                _state.value = _state.value.copy(
+                    isStitching = false,
+                    stitchError = "Không đủ bộ nhớ để ghép. Hãy đóng bớt ứng dụng khác hoặc chụp ít ảnh hơn rồi thử lại."
+                )
             } catch (e: Exception) {
                 Log.e("CaptureVM", "Manual stitching failed", e)
                 _state.value = _state.value.copy(isStitching = false, stitchError = e.message ?: "Lỗi ghép ảnh")
@@ -531,6 +540,14 @@ class CaptureViewModel : ViewModel() {
                     isStitching = false,
                     stitchProgress = 1f,
                     stitchedFilePath = outputFile.absolutePath
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                Log.e("CaptureVM", "Stitching ran out of memory", e)
+                _state.value = _state.value.copy(
+                    isStitching = false,
+                    stitchError = "Không đủ bộ nhớ để ghép. Hãy đóng bớt ứng dụng khác rồi thử lại."
                 )
             } catch (e: Exception) {
                 Log.e("CaptureVM", "Stitching failed", e)

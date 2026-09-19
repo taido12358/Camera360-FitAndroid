@@ -1,7 +1,6 @@
 package com.camera360
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -31,7 +30,7 @@ object StitchingEngine {
     private const val OUT_H = 1920
 
     /** Max long-side for loaded frames to keep peak memory reasonable. */
-    private const val MAX_FRAME_LONG_SIDE = 1024
+    private const val MAX_FRAME_LONG_SIDE = 960
 
     /**
      * One captured frame plus the device's exact orientation at capture time.
@@ -69,18 +68,9 @@ object StitchingEngine {
         // ── Load frames at reduced resolution ──────────────────────────────
         val frames = inputs.mapNotNull { input ->
             try {
-                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(input.file.absolutePath, opts)
-                val longSide = maxOf(opts.outWidth, opts.outHeight)
-                val sampleSize = (longSide / MAX_FRAME_LONG_SIDE).coerceAtLeast(1)
-
-                val loadOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-                val decoded = BitmapFactory.decodeFile(input.file.absolutePath, loadOpts)
-                    ?: return@mapNotNull null
-                // CameraX stores the sensor-oriented pixels plus an EXIF rotation tag;
-                // BitmapFactory ignores the tag, so apply it here — the stitching basis
-                // (right = device +X, up = device +Y) assumes an upright portrait frame.
-                val bmp = ImageIo.applyExifRotation(decoded, ImageIo.exifRotationDegrees(input.file))
+                // Decoded, EXIF-rotated upright (CameraX stores sensor-oriented pixels plus a rotation tag, and
+                // the stitching basis assumes an upright portrait frame) and scaled to a bounded size.
+                val bmp = ImageIo.loadUpright(input.file, MAX_FRAME_LONG_SIDE) ?: return@mapNotNull null
 
                 val sw = bmp.width; val sh = bmp.height
                 if (sw <= 0 || sh <= 0) { bmp.recycle(); return@mapNotNull null }

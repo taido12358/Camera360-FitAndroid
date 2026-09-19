@@ -260,3 +260,15 @@ Results (told -> repaired RMSE, true FOV 66): 58: 81 -> 17; 64: 53 -> 9; 70: 49
 -> 4.9; 74: 77 -> 11; correct FOV untouched; a 3 % error (68) is left alone
 (cost too flat). Needs a sweep that closes a loop; partial sweeps keep the
 measured FOV. The app shows a notice when it corrects the FOV.
+
+### Memory and time on the Galaxy A12 (2026-09-20)
+
+`StitchingDeviceTest` (androidTest) stitches 30 real JPEGs (1280x960 + EXIF
+rotate-90, like CameraX) through the whole Android path and logs `StitchDevice`.
+First measurement: 26 s, **peak Java heap 197 MB of the 256 MB limit** - too close,
+because `inSampleSize` only takes powers of two so 1280 px frames were never
+reduced (30 x 4.9 MB). `ImageIo.loadUpright` now finishes with an exact
+downscale (target 960 px long side, still ~14 px/deg vs ~10.7 px/deg in the
+output): **135 MB peak, 24.5 s**. `OutOfMemoryError` (not an Exception) is now
+caught in both stitch paths and reported in Vietnamese instead of leaving the UI
+stuck on "stitching". Note: the timing is dominated by rendering 3840x1920.
