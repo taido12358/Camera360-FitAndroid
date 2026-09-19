@@ -88,3 +88,15 @@ phone (Galaxy A12: accelerometer only). Instead of refusing to work:
   full pose, then the normal `StitchingEngine` renders (with gain
   compensation). Photos that cannot be linked to the rest are dropped with a
   notice; if fewer than 2 link, a Vietnamese error explains how to reshoot.
+
+## Live shooting feedback in manual mode (2026-09-20)
+
+Without a rotation-vector sensor there is no AR guidance, so the accelerometer
+drives a small HUD line in `ManualModePanel` (pure logic in `GravityMath`,
+JVM-tested): camera elevation ("Ngang"), roll about the camera axis
+("Nghieng"; warns above 8 deg), and a steadiness flag (gravity direction moved
+<= 0.8 deg over the last 400 ms) that turns the shutter ring yellow. Blur and roll
+are what hurt registration most. The 50 Hz gravity stream is kept out of
+`CaptureState`; only rounded tilt/roll/steady changes are published, and the
+shutter reads the newest vector directly (`latestUp`). Verified on the Galaxy
+A12 lying flat: "Ngang -86, Nghieng 0, da giu yen".

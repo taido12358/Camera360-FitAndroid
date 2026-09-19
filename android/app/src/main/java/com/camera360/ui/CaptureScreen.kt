@@ -303,7 +303,10 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                 modifier = Modifier.align(Alignment.TopCenter),
                 shotCount = state.shotCount,
                 stitching = state.isStitching,
-                done = state.stitchedFilePath != null
+                done = state.stitchedFilePath != null,
+                tiltDeg = state.tiltDeg,
+                rollDeg = state.rollDeg,
+                steady = state.isSteady
             )
         }
 
@@ -417,6 +420,7 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                 state.isManualMode -> ManualControlsRow(
                     shotCount = state.shotCount,
                     isCapturing = state.isCapturing,
+                    steady = state.isSteady,
                     onCapture = { viewModel.capturePhoto(imageCapture, context) },
                     onUndo = { viewModel.undoLastManualShot() },
                     onStitch = { viewModel.stitchPanorama(context) }
@@ -637,7 +641,15 @@ private fun StitchPromptUI(onStitch: () -> Unit) {
  * there is no AR guidance): explains how to shoot for the image-based stitcher.
  */
 @Composable
-private fun ManualModePanel(modifier: Modifier, shotCount: Int, stitching: Boolean, done: Boolean) {
+private fun ManualModePanel(
+    modifier: Modifier,
+    shotCount: Int,
+    stitching: Boolean,
+    done: Boolean,
+    tiltDeg: Int?,
+    rollDeg: Int?,
+    steady: Boolean
+) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
@@ -658,6 +670,20 @@ private fun ManualModePanel(modifier: Modifier, shotCount: Int, stitching: Boole
         )
         if (!stitching && !done) {
             Spacer(modifier = Modifier.height(4.dp))
+            // Live feedback from the accelerometer: keep the phone upright and still when pressing the shutter.
+            if (tiltDeg != null && rollDeg != null) {
+                val rollBad = !com.camera360.GravityMath.isRollAcceptable(rollDeg.toFloat())
+                Text(
+                    text = buildString {
+                        append("Ngẩng ${tiltDeg}° · Nghiêng ${rollDeg}° · ")
+                        append(if (rollBad) "giữ máy thẳng đứng" else if (steady) "đã giữ yên ✓" else "đang rung — giữ yên")
+                    },
+                    color = when { rollBad -> Color(0xFFFF8A80); steady -> Color(0xFF69F0AE); else -> Color(0xFFFFD54F) },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
             Text(
                 "Máy không có cảm biến con quay nên chụp thủ công: xoay chậm quanh mình, " +
                     "chụp mỗi khi xoay ~25–30°, để mỗi ảnh chồng lấn ≥40% với ảnh trước, ưu tiên cảnh nhiều chi tiết. " +
@@ -674,6 +700,7 @@ private fun ManualModePanel(modifier: Modifier, shotCount: Int, stitching: Boole
 private fun ManualControlsRow(
     shotCount: Int,
     isCapturing: Boolean,
+    steady: Boolean,
     onCapture: () -> Unit,
     onUndo: () -> Unit,
     onStitch: () -> Unit
@@ -697,7 +724,7 @@ private fun ManualControlsRow(
 
         ShutterButton(
             isCapturing = isCapturing,
-            isAligned = false,
+            isAligned = steady,                  // ring turns yellow once the phone is held still
             label = "Chụp",
             onCapture = onCapture
         )

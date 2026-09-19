@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.camera.core.ImageCapture
@@ -23,6 +24,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** Angular distance (degrees) within which the device is considered "aligned" to a target. */
@@ -80,6 +82,11 @@ data class CaptureState(
     // Manual mode (no rotation-vector sensor): free-form list of photos + live gravity.
     val manualShots: List<ManualShot> = emptyList(),
     val currentGravityUp: FloatArray? = null,
+    // Live shooting feedback derived from gravity (manual mode): camera elevation, roll about the
+    // camera axis (degrees, rounded) and whether the phone has been held still for ~0.4 s.
+    val tiltDeg: Int? = null,
+    val rollDeg: Int? = null,
+    val isSteady: Boolean = false,
     // Non-fatal note after a successful stitch (e.g. some photos had to be left out).
     val stitchNotice: String? = null,
     val totalFrames: Int = 24,
@@ -207,6 +214,9 @@ class CaptureViewModel : ViewModel() {
 
     private var gravityJob: Job? = null
 
+    /** Newest gravity direction; kept out of [state] because it changes ~50 times a second. */
+    @Volatile private var latestUp: FloatArray? = null
+
     fun startSensor(context: Context) {
         if (!ensureGyroscopeChecked(context)) {
             startGravity(context)
@@ -229,7 +239,18 @@ class CaptureViewModel : ViewModel() {
         val gm = GravityManager(context.applicationContext)
         if (!gm.isAvailable) return
         gravityJob = viewModelScope.launch {
-            gm.upFlow().collect { up -> _state.value = _state.value.copy(currentGravityUp = up) }
+            val tracker = GravityMath.SteadinessTracker()
+            gm.upFlow().collect { up ->
+                latestUp = up                                             // read at shutter time; not a state (50 Hz)
+                val steady = tracker.update(SystemClock.elapsedRealtime(), up)
+                val tilt = GravityMath.elevationDeg(up).roundToInt()
+                val roll = GravityMath.rollDeg(up).roundToInt()
+                val cur = _state.value
+                // Only publish when something the UI shows actually changed (avoids 50 recompositions a second).
+                if (cur.currentGravityUp == null || cur.tiltDeg != tilt || cur.rollDeg != roll || cur.isSteady != steady) {
+                    _state.value = cur.copy(currentGravityUp = up, tiltDeg = tilt, rollDeg = roll, isSteady = steady)
+                }
+            }
         }
     }
 
@@ -334,7 +355,7 @@ class CaptureViewModel : ViewModel() {
     /** Manual mode: take a photo and remember the gravity direction it was taken with. */
     private fun captureManualShot(imageCapture: ImageCapture, context: Context) {
         val s = _state.value
-        val gravity = s.currentGravityUp?.copyOf()
+        val gravity = (latestUp ?: s.currentGravityUp)?.copyOf()
         _state.value = s.copy(isCapturing = true, lastError = null, stitchNotice = null)
 
         val framesDir = File(context.filesDir, "frames").also { it.mkdirs() }
