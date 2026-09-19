@@ -95,7 +95,8 @@ class ManualPipelineTest {
         }
     }
 
-    @Test fun fullManualPipeline_reproducesTheWorld() {
+    /** Runs the whole pipeline telling the software [toldFov] while the photos were really shot at [longFov]. Returns (placed, rmse plain, rmse corrected). */
+    private fun runPipeline(toldFov: Double, calibrate: Boolean = false): Triple<Int, Double, Double> {
         val sphere = Sphere(23)
         val rnd = Random(31)
         val shots = plan(rnd)
@@ -115,14 +116,15 @@ class ManualPipelineTest {
             rgbPixels.add(big)
         }
 
-        val res = YawRegistration.estimateHeadings(gray, longFov)
+        val cal = if (calibrate) YawRegistration.estimateHeadingsCalibrated(gray, toldFov) { println("CAL $it") } else null
+        val res = cal?.result ?: YawRegistration.estimateHeadings(gray, toldFov)
+        val usedFov = cal?.fovDeg ?: toldFov
         val placed = shots.indices.filter { !res.headingsDeg[it].isNaN() }
-        println("PIPELINE placed ${placed.size}/${shots.size}, unreachable=${res.unreachable}")
-        assertTrue("most photos must be placed (${placed.size}/${shots.size})", placed.size >= shots.size * 0.8)
+        println("PIPELINE told fov=$toldFov calibrate=$calibrate -> used ${"%.1f".format(usedFov)}, placed ${placed.size}/${shots.size}")
 
         fun renderWith(offsets: DoubleArray?): IntArray {
             val poses = YawRegistration.poses(gray, res.headingsDeg, offsets)
-            val frames = placed.map { EquirectRenderer.Frame(rgbPixels[it], 240, 320, poses[it], longFov) }
+            val frames = placed.map { EquirectRenderer.Frame(rgbPixels[it], 240, 320, poses[it], usedFov) }
             return EquirectRenderer.render(frames, outW, outH, compensateExposure = true)
         }
 
@@ -137,8 +139,30 @@ class ManualPipelineTest {
         val corrected = shifted(renderWith(res.pitchOffsetsDeg))
         val e0 = rmse(sphere, plainOut)
         val e1 = rmse(sphere, corrected)
-        println("PIPELINE rmse gravity-only=${"%.2f".format(e0)} with pitch correction=${"%.2f".format(e1)}")
+        println("PIPELINE told fov=$toldFov rmse gravity-only=${"%.2f".format(e0)} with pitch correction=${"%.2f".format(e1)}")
+        return Triple(placed.size, e0, e1)
+    }
+
+    @Test fun fullManualPipeline_reproducesTheWorld() {
+        val (placed, e0, e1) = runPipeline(longFov)
+        assertTrue("most photos must be placed ($placed)", placed >= 24)
         assertTrue("pipeline output must resemble the true world (rmse $e1)", e1 < 25.0)
         assertTrue("pitch correction must not make things worse (plain $e0, corrected $e1)", e1 <= e0 * 1.05)
+    }
+
+    @Test fun calibration_neverMakesThingsWorse_whateverTheFovError() {
+        for (fov in listOf(58.0, 64.0, 70.0, 74.0)) {
+            val (_, _, plain) = runPipeline(fov, calibrate = false)
+            val (_, _, calibrated) = runPipeline(fov, calibrate = true)
+            println("FOVCHECK told=$fov uncalibrated=${"%.2f".format(plain)} calibrated=${"%.2f".format(calibrated)}")
+            assertTrue("fov $fov: calibration must not make the result worse ($plain -> $calibrated)", calibrated <= plain * 1.05)
+            if (fov <= 64.0 || fov >= 70.0) assertTrue("fov $fov: a large FOV error must be substantially repaired ($plain -> $calibrated)", calibrated < plain * 0.4)
+        }
+    }
+
+    @Test fun correctFieldOfView_isLeftAlone() {
+        val (_, _, plain) = runPipeline(longFov, calibrate = false)
+        val (_, _, calibrated) = runPipeline(longFov, calibrate = true)
+        assertTrue("calibration must not disturb a correct FOV ($plain vs $calibrated)", calibrated <= plain * 1.1)
     }
 }

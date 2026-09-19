@@ -238,3 +238,25 @@ accelerometer pitch error, +-15 % per-channel exposure drift) of a coloured
 textured sphere -> `YawRegistration` -> poses -> `EquirectRenderer` -> per-pixel
 comparison with the true sphere. Result: 30/30 photos placed; RMSE **7.59 ->
 5.11 / 255** with the pitch correction (exact poses give ~1).
+
+### Field-of-view self-calibration (2026-09-20)
+
+Found with `ManualPipelineTest`: a wrong FOV is very costly. The true FOV was
+66 deg; telling the software 58/62/70/74 raised the end-to-end colour error from
+~5 to 45-80 (measured angles scale with the FOV, so errors accumulate around the
+sweep and the 360 deg loop does not close). The FOV from CameraCharacteristics
+can easily be off on real phones (4:3 crop, zoom, lens).
+
+A single overlapping pair does NOT reveal it (NCC stays high over +-6 % FOV;
+an NCC-based calibration was tried first and peaked at the told FOV). A closed
+loop does. `estimateHeadingsCalibrated`: solve once; for candidate FOVs rescale
+every measured shift (`tan(a') = tan(a) * tan(fov'/2)/tan(fov/2)`), solve the
+graph and cost the contradictions; if a clearly better FOV shows up, **re-run the
+registration at that FOV and adopt it only if it is really better** (no more
+photos dropped, consistency cost < 0.85x) - the rescaled model is only an
+approximation and the first attempt (with the ratio inverted) proposed FOVs
+*away* from the truth, which the re-run safeguard rejected every time.
+Results (told -> repaired RMSE, true FOV 66): 58: 81 -> 17; 64: 53 -> 9; 70: 49
+-> 4.9; 74: 77 -> 11; correct FOV untouched; a 3 % error (68) is left alone
+(cost too flat). Needs a sweep that closes a loop; partial sweeps keep the
+measured FOV. The app shows a notice when it corrects the FOV.

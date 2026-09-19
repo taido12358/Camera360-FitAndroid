@@ -86,6 +86,21 @@ object YawRegistration {
     private const val REFINE_HALF_RANGE_DEG = 3.0
     private const val REFINE_STEP_DEG = 0.25
 
+    // FOV self-calibration (see estimateHeadingsCalibrated)
+    /** Re-run the whole registration only if the calibrated FOV differs from the measured one by more than this. */
+    private const val FOV_RERUN_THRESHOLD = 0.02
+    /** Residuals above this are treated as outliers when costing a candidate FOV. */
+    private const val FOV_RESIDUAL_CAP_DEG = 8.0
+    /** Cost added per photo a candidate FOV fails to place. */
+    private const val FOV_UNPLACED_PENALTY = 20.0
+    /** Below this mean squared residual (deg^2) the measured FOV is already consistent; leave it. */
+    private const val FOV_MIN_BASE_COST = 1.0
+    /** A candidate FOV is only tried (full re-run) if the rescaled-graph cost falls below this fraction of the measured FOV's. */
+    private const val FOV_TRIGGER_RATIO = 0.95
+
+    /** The re-run at the candidate FOV is only adopted if its own consistency cost is below this fraction of the first run's. */
+    private const val FOV_ACCEPT_RATIO = 0.85
+
     /** Cap on the per-photo pitch correction (the vertical search only reaches +-2 deg per pair). */
     private const val MAX_PITCH_OFFSET_DEG = 3.0
 
@@ -390,6 +405,118 @@ object YawRegistration {
 
         accumulate(jCells, bestD, bestV)
         return Refined(bestD, bestNcc, acc.n, bestV)
+    }
+
+    // ── Field-of-view self-calibration ─────────────────────────────────────────
+
+    class Calibrated(
+        val result: Result,
+        /** Field of view (deg, along the sensor's long side) the result was computed with. */
+        val fovDeg: Double,
+        /** True if the FOV had to be corrected relative to the one supplied. */
+        val fovAdjusted: Boolean
+    )
+
+    /**
+     * A wrong field of view is costly: every measured shift is an angle that scales with it, so the
+     * errors add up around the sweep and a 360 deg loop does not close (a 6-12 % FOV error raised the
+     * synthetic end-to-end colour error from ~5 to ~45-80). The FOV read from CameraCharacteristics can
+     * easily be off (cropped 4:3 frame, zoom, lens choice).
+     *
+     * A single overlapping pair barely reveals it (measured: NCC stays high over +-6 % of FOV), but a
+     * closed loop does: the angles around a full turn must add up to exactly 360 deg. So candidate FOVs
+     * are tried by rescaling every measured shift accordingly, solving the pose graph, and keeping the
+     * FOV whose solution the measurements contradict least. Sweeps that never close a loop give a flat
+     * cost curve and keep the measured FOV.
+     *
+     * Runs [estimateHeadings] once with [initialFovDeg]; if the best FOV differs by more than
+     * [FOV_RERUN_THRESHOLD] it runs again with the corrected value.
+     */
+    fun estimateHeadingsCalibrated(
+        frames: List<GrayFrame>,
+        initialFovDeg: Double,
+        onTiming: ((String) -> Unit)? = null
+    ): Calibrated {
+        val first = estimateHeadings(frames, initialFovDeg, onTiming = onTiming)
+        val fov = calibrateFov(frames.size, initialFovDeg, first, onTiming)
+        if (abs(fov / initialFovDeg - 1.0) <= FOV_RERUN_THRESHOLD) return Calibrated(first, initialFovDeg, false)
+
+        // The rescaled-pair model that proposed this FOV is only an approximation (the solver makes hard
+        // decisions), so never adopt it on faith: re-measure at the new FOV and keep it only if the
+        // result is genuinely better - no more photos dropped, clearly smaller contradiction.
+        val second = estimateHeadings(frames, fov, onTiming = onTiming)
+        val q1 = quality(frames.size, first)
+        val q2 = quality(frames.size, second)
+        onTiming?.invoke("fov candidate ${"%.1f".format(fov)}: quality ${"%.2f".format(q1)} -> ${"%.2f".format(q2)}, dropped ${first.unreachable.size} -> ${second.unreachable.size}")
+        val better = second.unreachable.size <= first.unreachable.size && q2 < q1 * FOV_ACCEPT_RATIO
+        return if (better) Calibrated(second, fov, true) else Calibrated(first, initialFovDeg, false)
+    }
+
+    /** Mean capped squared residual (deg^2) of a solved result's edges, plus a penalty per dropped photo: lower = more self-consistent. */
+    private fun quality(n: Int, r: Result): Double {
+        val h = r.headingsDeg
+        var total = 0.0; var wsum = 0.0
+        for (p in r.pairs) {
+            if (h[p.i].isNaN() || h[p.j].isNaN()) continue
+            val res = abs(wrap180(h[p.j] - h[p.i] - p.deltaDeg))
+            val w = p.ncc * p.ncc
+            total += w * min(res * res, FOV_RESIDUAL_CAP_DEG * FOV_RESIDUAL_CAP_DEG)
+            wsum += w
+        }
+        if (wsum == 0.0) return Double.MAX_VALUE
+        return total / wsum + r.unreachable.size * FOV_UNPLACED_PENALTY
+    }
+
+    /** FOV (deg) that makes the pair measurements of [result] most self-consistent; [initialFovDeg] if the evidence is weak. */
+    fun calibrateFov(n: Int, initialFovDeg: Double, result: Result, debug: ((String) -> Unit)? = null): Double {
+        val pairs = result.pairs
+        if (n < 4 || pairs.size < n) return initialFovDeg      // a loop needs at least as many edges as photos
+
+        val tanInit = tan(Math.toRadians(initialFovDeg) / 2.0)
+        fun rescaled(fov: Double): List<PairMatch> {
+            val ratio = tan(Math.toRadians(fov) / 2.0) / tanInit      // tan(angle) measured at this FOV = measured tan(angle) * this
+            return pairs.map { p ->
+                val d = Math.toDegrees(kotlin.math.atan(tan(Math.toRadians(p.deltaDeg)) * ratio))
+                p.copy(deltaDeg = d)
+            }
+        }
+
+        /** Mean capped squared residual (deg^2) of all edges around the solved graph, plus a penalty per dropped photo. */
+        fun cost(fov: Double): Double {
+            val ps = rescaled(fov)
+            val r = solve(n, ps)
+            val h = r.headingsDeg
+            var total = 0.0; var wsum = 0.0
+            for (p in ps) {
+                if (h[p.i].isNaN() || h[p.j].isNaN()) continue
+                val res = abs(wrap180(h[p.j] - h[p.i] - p.deltaDeg))
+                val w = p.ncc * p.ncc
+                total += w * min(res * res, FOV_RESIDUAL_CAP_DEG * FOV_RESIDUAL_CAP_DEG)
+                wsum += w
+            }
+            if (wsum == 0.0) return Double.MAX_VALUE
+            return total / wsum + r.unreachable.size * FOV_UNPLACED_PENALTY
+        }
+
+        val baseCost = cost(initialFovDeg)
+        var bestFov = initialFovDeg
+        var bestCost = baseCost
+        for (k in -8..8) {
+            if (k == 0) continue
+            val fov = initialFovDeg * (1.0 + 0.02 * k)
+            val c = cost(fov)
+            debug?.invoke("  fov=${"%.1f".format(fov)} cost=${"%.2f".format(c)} (base ${"%.2f".format(baseCost)})")
+            if (c < bestCost) { bestCost = c; bestFov = fov }
+        }
+        for (k in listOf(-3, -2, -1, 1, 2, 3)) {
+            val fov = bestFov * (1.0 + 0.005 * k)
+            val c = cost(fov)
+            if (c < bestCost) { bestCost = c; bestFov = fov }
+        }
+        // Only trust a clear, meaningful improvement; otherwise keep the measured FOV.
+        val clear = baseCost > FOV_MIN_BASE_COST && bestCost < baseCost * FOV_TRIGGER_RATIO
+        debug?.invoke("fov calibration: base cost ${"%.2f".format(baseCost)} -> best ${"%.2f".format(bestCost)} at ${"%.1f".format(bestFov)} (${if (clear) "applied" else "kept"})")
+        return if (clear) bestFov else initialFovDeg
     }
 
     // ── Public API ─────────────────────────────────────────────────────────────

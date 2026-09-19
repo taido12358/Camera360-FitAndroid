@@ -387,6 +387,8 @@ class CaptureViewModel : ViewModel() {
                 val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
                 val outputFile = File(context.filesDir, "panorama_${System.currentTimeMillis()}.jpg")
                 var dropped = 0
+                var fovUsed = hFov
+                var fovNote: String? = null
 
                 withContext(Dispatchers.Default) {
                     // 1) small grayscale copies + gravity for every usable shot
@@ -401,7 +403,14 @@ class CaptureViewModel : ViewModel() {
                     if (gray.size < 2) throw IllegalStateException("Không đọc được đủ ảnh để ghép")
 
                     // 2) heading of each photo from image registration
-                    val reg = YawRegistration.estimateHeadings(gray, hFov)
+                    // Also checks the measured FOV against the photos (loop closure) and corrects it if clearly wrong.
+                    val calibrated = YawRegistration.estimateHeadingsCalibrated(gray, hFov)
+                    val reg = calibrated.result
+                    fovUsed = calibrated.fovDeg
+                    if (calibrated.fovAdjusted) {
+                        Log.i("CaptureVM", "FOV corrected from ${"%.1f".format(hFov)} to ${"%.1f".format(fovUsed)} deg")
+                        fovNote = "Đã tự hiệu chỉnh góc nhìn camera: ${"%.0f".format(hFov)}° → ${"%.0f".format(fovUsed)}°"
+                    }
                     _state.value = _state.value.copy(stitchProgress = 0.30f)
                     val linked = gray.indices.filter { !reg.headingsDeg[it].isNaN() }
                     if (linked.size < 2) {
@@ -415,7 +424,7 @@ class CaptureViewModel : ViewModel() {
 
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
-                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov, cropToContent = true) { p ->
+                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
                         _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
                     }
                     copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")
@@ -425,7 +434,10 @@ class CaptureViewModel : ViewModel() {
                     isStitching = false,
                     stitchProgress = 1f,
                     stitchedFilePath = outputFile.absolutePath,
-                    stitchNotice = if (dropped > 0) "Đã bỏ $dropped ảnh không đủ phần chung với các ảnh còn lại" else null
+                    stitchNotice = listOfNotNull(
+                        if (dropped > 0) "Đã bỏ $dropped ảnh không đủ phần chung với các ảnh còn lại" else null,
+                        fovNote
+                    ).joinToString("\n").ifEmpty { null }
                 )
             } catch (e: Exception) {
                 Log.e("CaptureVM", "Manual stitching failed", e)
