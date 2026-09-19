@@ -660,7 +660,7 @@ private fun ManualModePanel(modifier: Modifier, shotCount: Int, stitching: Boole
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 "Máy không có cảm biến con quay nên chụp thủ công: xoay chậm quanh mình, " +
-                    "chụp mỗi khi xoay ~30–40°, để mỗi ảnh chồng lấn 30–50% với ảnh trước. " +
+                    "chụp mỗi khi xoay ~25–30°, để mỗi ảnh chồng lấn ≥40% với ảnh trước, ưu tiên cảnh nhiều chi tiết. " +
                     "Giữ máy đứng, đứng yên khi bấm chụp.",
                 color = Color.White.copy(alpha = 0.78f),
                 fontSize = 11.sp,

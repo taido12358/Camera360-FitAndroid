@@ -249,6 +249,36 @@ class YawRegistrationTest {
         assertTrue(res.ok)
         for (k in azs.indices) assertTrue("frame $k", YawRegistration.angularError(res.headingsDeg[k], azs[k]) < 2.0)
     }
+    /**
+     * Three-row hand-held-style sweep (30 photos, 36 deg apart, rows at -28/0/+28 deg elevation) of a
+     * real room photo, with exposure drift, sensor noise and gravity noise. Part of that photo is a
+     * hazy window with almost no texture, where correlation is unreliable — so the honest bar is:
+     * most photos placed, and most placed photos accurate (never silently wrong across the board).
+     */
+    @Test fun threeRowSweep_realPhoto_mostPhotosPlacedAndAccurate() {
+        val scene = PhotoScene()
+        val rnd = Random(12)
+        val frames = ArrayList<GrayFrame>()
+        val truth = ArrayList<Double>()
+        for (row in 0 until 3) for (k in 0 until 10) {
+            val az = k * 36.0 + row * 6.0                       // rows are offset a little, like a hand-held sweep
+            val el = (row - 1) * 28.0 + (rnd.nextDouble() - 0.5) * 6.0
+            frames.add(photo(scene, PoseMath.rotationFromAzElRoll(az, el, (rnd.nextDouble() - 0.5) * 4.0),
+                gravityNoiseDeg = 0.3, rnd = Random(rnd.nextLong()), exposure = 0.85 + rnd.nextDouble() * 0.3, pixelNoise = 3.0))
+            truth.add(az)
+        }
+        val t0 = System.nanoTime()
+        val res = YawRegistration.estimateHeadings(frames, longFov)
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("registration took $ms ms on the JVM", ms < 15_000)
+
+        val placed = truth.indices.filter { !res.headingsDeg[it].isNaN() }
+        val errs = placed.map { YawRegistration.angularError(res.headingsDeg[it] - res.headingsDeg[0], truth[it] - truth[0]) }
+        val accurate = errs.count { it < 4.0 }
+        assertTrue("only ${placed.size}/30 placed (unreachable=${res.unreachable})", placed.size >= 24)
+        assertTrue("only $accurate/${placed.size} placed photos accurate (errs=${errs.map { "%.1f".format(it) }})",
+            accurate >= placed.size * 0.8)
+    }
 
     @Test fun strayFirstShot_doesNotSinkTheOthers() {
         val stray = photo(World(99), PoseMath.rotationFromAzElRoll(0.0, 0.0))

@@ -80,7 +80,7 @@ phone (Galaxy A12: accelerometer only). Instead of refusing to work:
   `TYPE_ACCELEROMETER`). Each shot stores that vector (`ManualShot`) — this
   fixes pitch and roll exactly.
 - No AR dots / 24-frame targets / auto-capture. `ManualModePanel` shows shot
-  count + how to shoot (rotate slowly, ~30-40 deg per shot, 30-50 % overlap,
+  count + how to shoot (rotate slowly, ~25-30 deg per shot, >= 40 % overlap,
   hold still). Bottom row: undo-last / shutter / stitch (needs >= 2 shots).
 - Stitching (`CaptureViewModel.stitchManual`): downscale each photo to a
   192 px grayscale copy, `YawRegistration.estimateHeadings` recovers each

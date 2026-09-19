@@ -64,6 +64,18 @@ object YawRegistration {
     /** A weaker match must beat the best *different* shift by at least this much. */
     private const val MIN_PEAK_MARGIN = 0.08
 
+    /** Proposals for a photo's heading within this many degrees of each other count as agreeing. */
+    private const val CLUSTER_DEG = 3.5
+
+    /** A photo with only one supporting edge is placed only if that edge is at least this strong. */
+    private const val SINGLE_EDGE_NCC = 0.4
+
+    /** An edge agrees with the solution if its residual is within this many degrees. */
+    private const val INLIER_DEG = 4.0
+
+    /** A placed photo must have at least this share (by weight) of its edges agreeing with the solution. */
+    private const val MIN_INLIER_SHARE = 0.5
+
     /** Half width (deg) of the refinement search around the coarse peak, and its step. */
     private const val REFINE_HALF_RANGE_DEG = 3.0
     private const val REFINE_STEP_DEG = 0.25
@@ -77,7 +89,11 @@ object YawRegistration {
     /** Grey-level floor added to the local std-dev when normalising contrast (suppresses noise in flat areas). */
     private const val LCN_FLOOR = 6.0
 
-    data class PairMatch(val i: Int, val j: Int, val deltaDeg: Double, val ncc: Double, val cells: Int)
+    data class PairMatch(
+        val i: Int, val j: Int, val deltaDeg: Double, val ncc: Double, val cells: Int,
+        /** Coarse NCC of the best shift minus the best clearly-different shift: how unambiguous the match is. */
+        val margin: Double = 1.0
+    )
 
     class Result(
         /** Heading (deg) of each photo relative to photo 0; NaN for photos that could not be linked. */
@@ -326,68 +342,91 @@ object YawRegistration {
             if (c.ncc < CONFIDENT_NCC && c.ncc - c.runnerUpNcc < MIN_PEAK_MARGIN && minNcc > 0.0) continue
             val jCells = cellCache.getOrPut(j) { cellsOf(samplers[j]) }
             val (delta, ncc, cells) = refine(samplers[i], jCells, c.deltaDeg)
-            if (ncc >= minNcc) pairs.add(PairMatch(i, j, wrap180(delta), ncc, cells))
+            if (ncc >= minNcc) pairs.add(PairMatch(i, j, wrap180(delta), ncc, cells, c.ncc - c.runnerUpNcc))
         }
         return solve(n, pairs)
     }
 
-    /** Solves headings from pair measurements (exposed for testing the graph logic on its own). */
+    /**
+     * Solves headings from pair measurements (exposed for testing the graph logic on its own).
+     *
+     * Individual pair matches cannot be trusted on their own — repetitive textures produce
+     * confident-looking but wrong shifts (measured: ~30 % of matches in a three-row sweep of a
+     * room with a checkerboard TV, some with NCC 0.8) — so placement is done by *voting*:
+     * start from the single most confident pair, then repeatedly place the photo whose linked,
+     * already-placed neighbours agree best on where it goes (proposals clustering within
+     * [CLUSTER_DEG]). Wrong matches scatter, right ones cluster. A least-squares refinement over
+     * all edges (Cauchy re-weighted, closes 360 deg loops) follows.
+     */
     fun solve(n: Int, pairs: List<PairMatch>): Result {
         val heading = DoubleArray(n) { Double.NaN }
+        if (n == 0) return Result(heading, emptyList(), pairs)
 
-        // Anchor on the largest group of mutually-linked photos (ties: the group holding photo 0),
-        // so one stray first shot cannot make every other photo look "unlinked".
-        val group = IntArray(n) { it }
-        fun find(x: Int): Int { var r = x; while (group[r] != r) r = group[r]; return r }
-        for (p in pairs) { val a = find(p.i); val b = find(p.j); if (a != b) group[maxOf(a, b)] = minOf(a, b) }
-        val sizes = HashMap<Int, Int>()
-        for (k in 0 until n) sizes.merge(find(k), 1, Int::plus)
-        val bestGroup = sizes.entries.maxWithOrNull(compareBy<Map.Entry<Int, Int>>({ it.value }, { it.key == find(0) }))?.key ?: find(0)
-        val root = (0 until n).first { find(it) == bestGroup }
+        val placed = BooleanArray(n)
+        val seed = pairs.maxByOrNull { it.ncc }
+        val root = seed?.i ?: 0
         heading[root] = 0.0
+        placed[root] = true
+        if (seed != null) { heading[seed.j] = heading[seed.i] + seed.deltaDeg; placed[seed.j] = true }
 
-        // Initial headings: maximum-weight spanning tree grown from the root (Prim).
-        val inTree = BooleanArray(n); inTree[root] = true
+        class Proposal(val heading: Double, val weight: Double, val ncc: Double)
+
         while (true) {
-            var best: PairMatch? = null; var bestFrom = -1
-            for (p in pairs) {
-                val a = inTree[p.i]; val b = inTree[p.j]
-                if (a == b) continue
-                if (best == null || p.ncc > best.ncc) { best = p; bestFrom = if (a) p.i else p.j }
-            }
-            val e = best ?: break
-            if (bestFrom == e.i) { heading[e.j] = heading[e.i] + e.deltaDeg; inTree[e.j] = true }
-            else { heading[e.i] = heading[e.j] - e.deltaDeg; inTree[e.i] = true }
-        }
-        val unreachable = (0 until n).filter { !inTree[it] }
+            var bestNode = -1; var bestScore = 0.0; var bestHeading = 0.0
+            for (u in 0 until n) {
+                if (placed[u]) continue
+                val props = ArrayList<Proposal>()
+                for (p in pairs) {
+                    if (p.i == u && placed[p.j]) props.add(Proposal(heading[p.j] - p.deltaDeg, p.ncc * p.ncc, p.ncc))
+                    else if (p.j == u && placed[p.i]) props.add(Proposal(heading[p.i] + p.deltaDeg, p.ncc * p.ncc, p.ncc))
+                }
+                if (props.isEmpty()) continue
 
-        // Refine with every edge: unwrap each measurement to the 360° branch nearest the current
-        // estimate, then weighted least squares (this is what closes a 360° loop).
-        val nodes = (0 until n).filter { inTree[it] }
-        if (nodes.size > 1) {
+                // strongest cluster of mutually-agreeing proposals
+                var clusterScore = 0.0; var clusterCount = 0; var clusterHeading = 0.0; var clusterMaxNcc = 0.0
+                for (a in props) {
+                    val members = props.filter { abs(wrap180(it.heading - a.heading)) <= CLUSTER_DEG }
+                    val score = members.sumOf { it.weight }
+                    if (score > clusterScore) {
+                        clusterScore = score; clusterCount = members.size
+                        clusterMaxNcc = members.maxOf { it.ncc }
+                        val wsum = members.sumOf { it.weight }
+                        clusterHeading = a.heading + members.sumOf { wrap180(it.heading - a.heading) * it.weight } / wsum
+                    }
+                }
+                val believable = clusterCount >= 2 || clusterMaxNcc >= SINGLE_EDGE_NCC
+                if (believable && clusterScore > bestScore) { bestNode = u; bestScore = clusterScore; bestHeading = clusterHeading }
+            }
+            if (bestNode < 0) break
+            heading[bestNode] = bestHeading
+            placed[bestNode] = true
+        }
+        // Least-squares refinement over every edge between placed photos: unwrap each measurement to
+        // the 360 deg branch nearest the current estimate, then Cauchy re-weighted weighted LS (this
+        // is what closes a 360 deg loop). Reads/updates `heading` for the currently placed photos.
+        fun branch(p: PairMatch) =
+            p.deltaDeg + 360.0 * ((heading[p.j] - heading[p.i] - p.deltaDeg) / 360.0).roundToInt()
+
+        fun cauchy(residualDeg: Double) =
+            1.0 / (1.0 + (residualDeg / ROBUST_SCALE_DEG) * (residualDeg / ROBUST_SCALE_DEG))
+
+        fun refineAll() {
+            val nodes = (0 until n).filter { placed[it] }
+            if (nodes.size < 2) return
             val idx = HashMap<Int, Int>().also { m -> nodes.filter { it != root }.forEachIndexed { k, v -> m[v] = k } }
             val m = idx.size
 
-            fun branch(p: PairMatch) =
-                p.deltaDeg + 360.0 * ((heading[p.j] - heading[p.i] - p.deltaDeg) / 360.0).roundToInt()
-
-            fun cauchy(residualDeg: Double) =
-                1.0 / (1.0 + (residualDeg / ROBUST_SCALE_DEG) * (residualDeg / ROBUST_SCALE_DEG))
-
-            // Start from the spanning-tree headings: a measurement that already disagrees with
-            // them by many degrees is a false match and must not get a vote in the first solve
-            // (otherwise it drags the whole chain before it can be down-weighted).
+            // Edges already disagreeing with the voted placement are false matches: no vote in the first solve.
             val robust = DoubleArray(pairs.size) { e ->
                 val p = pairs[e]
-                if (!inTree[p.i] || !inTree[p.j]) 1.0 else cauchy(heading[p.j] - heading[p.i] - branch(p))
+                if (!placed[p.i] || !placed[p.j]) 1.0 else cauchy(heading[p.j] - heading[p.i] - branch(p))
             }
-
             repeat(8) {
                 val a = Array(m) { DoubleArray(m) }
                 val b = DoubleArray(m)
                 val chosen = DoubleArray(pairs.size)
                 for ((e, p) in pairs.withIndex()) {
-                    if (!inTree[p.i] || !inTree[p.j]) continue
+                    if (!placed[p.i] || !placed[p.j]) continue
                     val d = branch(p)
                     chosen[e] = d
                     val w = p.ncc * p.ncc * robust[e]
@@ -398,14 +437,39 @@ object YawRegistration {
                 }
                 val x = GainCompensation.solveLinear(a, b)
                 for ((node, k) in idx) heading[node] = x[k]
-                // Robust re-weighting (Cauchy): a measurement that disagrees with the rest by many
-                // degrees is a false match, not evidence, so its weight collapses toward 0.
                 for ((e, p) in pairs.withIndex()) {
-                    if (!inTree[p.i] || !inTree[p.j]) continue
+                    if (!placed[p.i] || !placed[p.j]) continue
                     robust[e] = cauchy(heading[p.j] - heading[p.i] - chosen[e])
                 }
             }
         }
+
+        refineAll()
+
+        // Consistency check: a photo whose edges mostly contradict the solution (weight share within
+        // INLIER_DEG below MIN_INLIER_SHARE) was placed on false evidence — typically low-texture or
+        // repetitive content. Drop the worst offender and re-solve, rather than keep a wrong placement.
+        repeat(n) {
+            var worstNode = -1; var worstShare = 1.0
+            for (u in 0 until n) {
+                if (!placed[u] || u == root) continue
+                var good = 0.0; var total = 0.0
+                for (p in pairs) {
+                    if (!placed[p.i] || !placed[p.j] || (p.i != u && p.j != u)) continue
+                    val w = p.ncc * p.ncc
+                    total += w
+                    if (abs(heading[p.j] - heading[p.i] - branch(p)) <= INLIER_DEG) good += w
+                }
+                val share = if (total > 0.0) good / total else 1.0
+                if (share < worstShare) { worstShare = share; worstNode = u }
+            }
+            if (worstNode < 0 || worstShare >= MIN_INLIER_SHARE) return@repeat
+            placed[worstNode] = false
+            heading[worstNode] = Double.NaN
+            refineAll()
+        }
+        val unreachable = (0 until n).filter { !placed[it] }
+
         // Report relative to photo 0 whenever it is part of the solved group.
         if (!heading[0].isNaN() && heading[0] != 0.0) {
             val h0 = heading[0]

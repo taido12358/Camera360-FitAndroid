@@ -142,3 +142,25 @@ sensor noise + 0.4 deg gravity noise exposed three weaknesses, all fixed:
 
 Known limit: plain, low-detail walls (little for correlation to lock onto) give
 weak or no links; the app then drops unlinkable photos with a notice.
+
+### Graph solve: voting + consistency check (2026-09-20)
+
+Measured on a three-row sweep of a real room photo (with a checkerboard TV and
+a hazy window): ~30 % of pair matches were wrong, some with NCC 0.8, and
+neither NCC nor peak margin separated right from wrong. So the solver no longer
+trusts a spanning tree of best matches:
+
+1. **Voting placement** - seed with the single most confident pair, then
+   repeatedly place the photo whose already-placed neighbours agree best
+   (proposals within 3.5 deg cluster; needs >= 2 agreeing edges or one edge
+   with NCC >= 0.40).
+2. **Robust LS refinement** over all edges (Cauchy IRLS, closes 360 deg loops).
+3. **Consistency prune** - a photo with < 50 % (by weight) of its edges within
+   4 deg of the solution is dropped and the rest re-solved; dropped photos are
+   reported to the user instead of being placed wrongly.
+
+Result on that sweep: 24/30 photos within 1 deg; the rest (in the featureless
+window) are dropped or misplaced. Tightening the prune thresholds also dropped
+good photos elsewhere, so 4 deg / 50 % is the compromise. Real-device data is
+needed to tune further. Shooting advice for the UI: step ~25-30 deg (a portrait
+photo is only ~52 deg wide on the short side), prefer textured scenes.
