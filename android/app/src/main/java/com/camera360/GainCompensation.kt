@@ -74,7 +74,7 @@ object GainCompensation {
     }
 
     /** Gaussian elimination with partial pivoting; 1.0 for a singular column. */
-    private fun solveLinear(a: Array<DoubleArray>, b: DoubleArray): DoubleArray {
+    internal fun solveLinear(a: Array<DoubleArray>, b: DoubleArray): DoubleArray {
         val n = b.size
         val m = Array(n) { i -> DoubleArray(n + 1) { j -> if (j < n) a[i][j] else b[i] } }
         for (col in 0 until n) {
