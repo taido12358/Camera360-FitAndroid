@@ -55,6 +55,7 @@ object StitchingEngine {
      * the short side is derived from the frame's pixel aspect ratio, so this
      * works for whatever orientation the frame ends up in after EXIF rotation.
      * [onProgress] is called with 0..1 from worker threads — safe to update StateFlow.
+     * Returns how much of the horizontal circle the panorama covers (for "shoot more here" advice).
      */
     suspend fun stitch(
         inputs: List<FrameInput>,
@@ -62,7 +63,7 @@ object StitchingEngine {
         hFovDeg: Double = CAMERA_HFOV_DEG,
         cropToContent: Boolean = false,
         onProgress: (Float) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    ): CoverageStats.Azimuth = withContext(Dispatchers.IO) {
         onProgress(0f)
 
         // ── Load frames at reduced resolution ──────────────────────────────
@@ -97,8 +98,9 @@ object StitchingEngine {
         var outW = OUT_W
         var outH = OUT_H
         var pixels = outPixels
+        val covered = BooleanArray(OUT_W * OUT_H) { outPixels[it] != EquirectRenderer.UNCOVERED }
+        val coverage = CoverageStats.azimuth(covered, OUT_W, OUT_H)
         if (cropToContent) {
-            val covered = BooleanArray(OUT_W * OUT_H) { outPixels[it] != EquirectRenderer.UNCOVERED }
             val b = CoverageCrop.bounds(covered, OUT_W, OUT_H)
             if (b != null && (b.width < OUT_W || b.height < OUT_H)) {
                 outW = b.width
@@ -120,5 +122,6 @@ object StitchingEngine {
         }
         outBmp.recycle()
         onProgress(1f)
+        coverage
     }
 }

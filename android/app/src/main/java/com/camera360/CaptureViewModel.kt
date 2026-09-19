@@ -33,6 +33,9 @@ private const val ALIGNMENT_THRESHOLD_DEG = 10f
 /** How often the auto-capture loop polls alignment state. */
 private const val AUTO_CAPTURE_POLL_MS = 60L
 
+/** A horizontal gap in the panorama at least this wide (degrees) is reported to the user. */
+private const val COVERAGE_GAP_NOTICE_DEG = 15.0
+
 /** Long side (px) of the grayscale copies used for image registration in manual mode. */
 private const val GRAY_LONG_SIDE = 192
 
@@ -410,6 +413,7 @@ class CaptureViewModel : ViewModel() {
                 var dropped = 0
                 var fovUsed = hFov
                 var fovNote: String? = null
+                var coverageNote: String? = null
 
                 withContext(Dispatchers.Default) {
                     // 1) small grayscale copies + gravity for every usable shot
@@ -445,8 +449,12 @@ class CaptureViewModel : ViewModel() {
 
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
-                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
+                    val cov = StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
                         _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
+                    }
+                    if (cov.largestGapDeg >= COVERAGE_GAP_NOTICE_DEG) {
+                        coverageNote = "Ảnh phủ ${(cov.coveredFraction * 100).toInt()}% vòng ngang, còn hở khoảng ${cov.largestGapDeg.roundToInt()}° — " +
+                            "chụp thêm ở hướng còn trống nếu muốn đủ 360°"
                     }
                     copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")
                 }
@@ -457,6 +465,7 @@ class CaptureViewModel : ViewModel() {
                     stitchedFilePath = outputFile.absolutePath,
                     stitchNotice = listOfNotNull(
                         if (dropped > 0) "Đã bỏ $dropped ảnh không đủ phần chung với các ảnh còn lại" else null,
+                        coverageNote,
                         fovNote
                     ).joinToString("\n").ifEmpty { null }
                 )

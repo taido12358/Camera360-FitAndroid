@@ -108,3 +108,12 @@ pinch-zoom up to 8x, drag to pan, double-tap to reset, width capped at 4096 px
 when decoding), "Mở Thư viện" and "Chụp lại". The old gallery intent carried no
 image URI, so it could not be relied on to show the panorama. Verified on the
 emulator.
+
+## Coverage advice after stitching (2026-09-20)
+
+`StitchingEngine.stitch` returns `CoverageStats.Azimuth` (pure, JVM-tested,
+`CoverageStatsTest`): the share of the 360 deg circle seen by any photo and the
+largest circular gap. In manual mode a gap of 15 deg or more is reported in the
+completion notice ("Ảnh phủ N% vòng ngang, còn hở khoảng G°...") so the user
+knows where to shoot more. Guided mode ignores the result (it always aims at
+full coverage).

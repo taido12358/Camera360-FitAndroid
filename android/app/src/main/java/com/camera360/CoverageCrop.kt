@@ -72,3 +72,43 @@ object CoverageCrop {
     /** Fraction of a row/column that must be covered for it to count. */
     private const val MIN_COVERAGE_FRACTION = 0.004
 }
+
+/**
+ * How much of the horizontal circle (azimuth) a panorama actually covers, for telling the user
+ * where to shoot more. Pure Kotlin, JVM-tested.
+ */
+object CoverageStats {
+
+    /** [coveredFraction] of the 360 deg circle seen by any photo, and the [largestGapDeg] left uncovered. */
+    data class Azimuth(val coveredFraction: Double, val largestGapDeg: Double)
+
+    /**
+     * A column counts as covered when at least [minCoverage] of its rows are; [covered] is row-major.
+     * The gap search is circular (azimuth wraps).
+     */
+    fun azimuth(covered: BooleanArray, w: Int, h: Int, minCoverage: Double = 0.004): Azimuth {
+        require(covered.size == w * h)
+        val minPixels = maxOf(2, (h * minCoverage).toInt())
+        val colOk = BooleanArray(w)
+        for (x in 0 until w) {
+            var c = 0
+            for (y in 0 until h) if (covered[y * w + x]) c++
+            colOk[x] = c >= minPixels
+        }
+        val coveredCols = colOk.count { it }
+        if (coveredCols == 0) return Azimuth(0.0, 360.0)
+        if (coveredCols == w) return Azimuth(1.0, 0.0)
+
+        val first = colOk.indexOfFirst { it }
+        var largest = 0
+        var i = 0
+        while (i < w) {
+            if (!colOk[(first + i) % w]) {
+                var len = 0
+                while (i < w && !colOk[(first + i) % w]) { len++; i++ }
+                if (len > largest) largest = len
+            } else i++
+        }
+        return Azimuth(coveredCols.toDouble() / w, largest * 360.0 / w)
+    }
+}
