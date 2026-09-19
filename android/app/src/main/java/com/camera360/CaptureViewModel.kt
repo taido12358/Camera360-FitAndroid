@@ -415,7 +415,7 @@ class CaptureViewModel : ViewModel() {
 
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
-                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov) { p ->
+                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov, cropToContent = true) { p ->
                         _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
                     }
                     copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")

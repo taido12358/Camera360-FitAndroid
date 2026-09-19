@@ -164,3 +164,14 @@ window) are dropped or misplaced. Tightening the prune thresholds also dropped
 good photos elsewhere, so 4 deg / 50 % is the compromise. Real-device data is
 needed to tune further. Shooting advice for the UI: step ~25-30 deg (a portrait
 photo is only ~52 deg wide on the short side), prefer textured scenes.
+
+### Crop to covered area (2026-09-20)
+
+`StitchingEngine.stitch(..., cropToContent = true)` (used by manual mode) crops
+the equirectangular render to what photos actually covered:
+`CoverageCrop.bounds` (pure, JVM-tested) finds the row band and the smallest
+*circular* column range (azimuth wraps, so the crop can straddle the seam) that
+contain all covered pixels, ignoring a few stray fringe pixels. Uncovered pixels
+are marked internally (alpha 0) and only turned black at the end. Guided
+24-frame mode keeps the full 2:1 frame (standard for 360 photo viewers).
+Verified on the emulator (temporarily enabled for the guided path: 3840x1869).

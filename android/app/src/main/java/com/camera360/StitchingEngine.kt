@@ -36,6 +36,9 @@ object StitchingEngine {
     /** Max long-side for loaded frames to keep peak memory reasonable. */
     private const val MAX_FRAME_LONG_SIDE = 1024
 
+    /** Marks an output pixel no photo covered (fully transparent, distinct from any rendered colour). */
+    private const val UNCOVERED = 0
+
     /** Min. blend weight (0 = frame edge, 1 = centre) for a sample to count in gain estimation. */
     private const val GAIN_MIN_WEIGHT = 0.25
 
@@ -86,6 +89,7 @@ object StitchingEngine {
         inputs: List<FrameInput>,
         outputFile: File,
         hFovDeg: Double = CAMERA_HFOV_DEG,
+        cropToContent: Boolean = false,
         onProgress: (Float) -> Unit
     ) = withContext(Dispatchers.IO) {
         onProgress(0f)
@@ -163,8 +167,30 @@ object StitchingEngine {
 
         // ── Write output JPEG ───────────────────────────────────────────────
         onProgress(0.95f)
-        val outBmp = Bitmap.createBitmap(OUT_W, OUT_H, Bitmap.Config.ARGB_8888)
-        outBmp.setPixels(outPixels, 0, OUT_W, 0, 0, OUT_W, OUT_H)
+
+        // Rendered pixels always have alpha 0xFF; UNCOVERED (0) marks directions no photo saw.
+        // Optionally crop to what was actually covered (a partial sweep would otherwise be a small
+        // picture in a mostly black 2:1 frame); the horizontal axis is azimuth, so the crop may wrap.
+        var outW = OUT_W
+        var outH = OUT_H
+        var pixels = outPixels
+        if (cropToContent) {
+            val covered = BooleanArray(OUT_W * OUT_H) { outPixels[it] != UNCOVERED }
+            val b = CoverageCrop.bounds(covered, OUT_W, OUT_H)
+            if (b != null && (b.width < OUT_W || b.height < OUT_H)) {
+                outW = b.width
+                outH = b.height
+                pixels = IntArray(outW * outH) { i ->
+                    val x = (b.x0 + i % outW) % OUT_W
+                    val y = b.y0 + i / outW
+                    outPixels[y * OUT_W + x]
+                }
+            }
+        }
+        for (i in pixels.indices) if (pixels[i] == UNCOVERED) pixels[i] = Color.BLACK
+
+        val outBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        outBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
         outputFile.parentFile?.mkdirs()
         outputFile.outputStream().buffered().use { stream ->
             outBmp.compress(Bitmap.CompressFormat.JPEG, 92, stream)
@@ -305,7 +331,7 @@ object StitchingEngine {
                     (gAcc / wAcc).toInt().coerceIn(0, 255),
                     (bAcc / wAcc).toInt().coerceIn(0, 255)
                 )
-            } else Color.BLACK
+            } else UNCOVERED
         }
     }
 }
