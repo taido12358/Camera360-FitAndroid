@@ -389,7 +389,9 @@ class CaptureViewModel : ViewModel() {
     fun undoLastManualShot() {
         val s = _state.value
         if (s.isStitching || s.manualShots.isEmpty()) return
+        val removed = s.manualShots.last()
         _state.value = s.copy(manualShots = s.manualShots.dropLast(1), lastError = null, stitchError = null, stitchNotice = null)
+        viewModelScope.launch(Dispatchers.IO) { runCatching { File(removed.filePath).delete() } }   // it is never used again
     }
 
     /**
@@ -575,10 +577,26 @@ class CaptureViewModel : ViewModel() {
         // would short-circuit on the cached `hasGyroscope` field and never
         // republish it to the fresh CaptureState, leaving the banner/guard
         // logic thinking it's still "unknown".
+        val old = _state.value
+
+        // The working copies of the shots and the internal copy of the panorama are 2-3 MB each; the
+        // gallery keeps its own mirror, so drop them when a new session starts instead of letting app
+        // storage grow with every session.
+        val stale = buildList {
+            old.manualShots.forEach { add(it.filePath) }
+            old.frames.forEach { f -> f.filePath?.let { add(it) } }
+            old.stitchedFilePath?.let { add(it) }
+        }
+        if (stale.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                stale.forEach { path -> runCatching { File(path).delete() } }
+            }
+        }
+
         _state.value = CaptureState(
             hasGyroscope = hasGyroscope,
-            measuredHFovDeg = _state.value.measuredHFovDeg,
-            currentGravityUp = _state.value.currentGravityUp
+            measuredHFovDeg = old.measuredHFovDeg,
+            currentGravityUp = old.currentGravityUp
         )
     }
 
