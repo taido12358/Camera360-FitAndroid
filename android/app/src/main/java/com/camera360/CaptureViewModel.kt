@@ -210,6 +210,12 @@ class CaptureViewModel : ViewModel() {
      * (auto-capture misfiring off a frozen orientation, stitching failing
      * only after all 24 frames are manually captured).
      */
+    /** Debug-build test hook (see MainActivity): behave as a device without a rotation-vector sensor. */
+    fun debugForceManualMode() {
+        hasGyroscope = false
+        _state.update { it.copy(hasGyroscope = false) }
+    }
+
     private fun ensureGyroscopeChecked(context: Context): Boolean {
         hasGyroscope?.let { return it }
         val present = GyroscopeManager(context.applicationContext).hasGyroscope
@@ -232,7 +238,23 @@ class CaptureViewModel : ViewModel() {
     /** Newest gravity direction; kept out of [state] because it changes ~50 times a second. */
     @Volatile private var latestUp: FloatArray? = null
 
+    /** Working photos and panoramas left behind by an earlier process (app closed or killed mid-session). */
+    private var staleCleaned = false
+
+    private fun cleanLeftoverFiles(context: Context) {
+        if (staleCleaned) return
+        staleCleaned = true
+        // Nothing of this process could be using them yet: at first start there is no active session.
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                File(context.filesDir, "frames").listFiles()?.forEach { it.delete() }
+                context.filesDir.listFiles { f -> f.name.startsWith("panorama_") && f.name.endsWith(".jpg") }?.forEach { it.delete() }
+            }
+        }
+    }
+
     fun startSensor(context: Context) {
+        cleanLeftoverFiles(context.applicationContext)
         if (!ensureGyroscopeChecked(context)) {
             startGravity(context)
             return

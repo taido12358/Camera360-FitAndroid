@@ -22,3 +22,18 @@ what exists today:
 Follow the status definitions in rules/ai-agent/after-coding.md — do not
 use "done" language until the relevant tests above actually exist and
 pass.
+
+## Testing manual mode on a phone/emulator that has a rotation-vector sensor (2026-09-20)
+
+Debug builds accept a launch flag that forces the accelerometer-only mode, so the whole
+in-app flow (shots, tilt/steadiness HUD, stitch, coverage notice, diagnostics file,
+viewer, gallery) can be exercised without a sensor-less phone:
+
+    adb shell am start -n com.camera360/.MainActivity --ez force_manual true
+
+Only honoured when the app is debuggable (`FLAG_DEBUGGABLE`). On the emulator every pose
+yields the same picture, so this checks the *integration* (registration puts identical
+photos at heading 0, coverage notice, files) and not seam quality. Verified 2026-09-20:
+8 shots -> 8/8 placed, stitch 7.7 s, diagnostics written, notice "Ảnh phủ 24% vòng
+ngang, còn hở khoảng 272°". Leftover working photos from an earlier process are deleted
+at the next start (`cleanLeftoverFiles`).
