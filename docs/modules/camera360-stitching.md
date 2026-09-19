@@ -311,3 +311,16 @@ to a global rotation): RMSE **26.4 -> 5.9**, 30/30 photos refined. On the
 emulator (same image for every pose, so registration contradicts the sensor):
 "Pose refinement: 0/24" and the normal panorama - the fallback works. Not yet
 seen on a real phone with a rotation-vector sensor.
+
+### Session diagnostics (2026-09-20)
+
+After every manual-mode stitch the app writes `files/last_session_diagnostics.txt`
+(app-private, never leaves the device; `SessionDiagnostics`, JVM-tested): photos
+used/unreadable, FOV measured/used/adjusted, placed/unreachable photos, timings
+(registration, stitch, per-phase), coverage, then one line per photo (heading or
+DROPPED, pitch correction, tilt, roll) and one per kept pair (delta, NCC, cells,
+peak margin, vertical offset). Pull it with
+`adb shell run-as com.camera360 cat files/last_session_diagnostics.txt`
+(debug build) so a real-phone run can be analysed from numbers, not only from
+the picture. The original shots stay in `files/frames/manual_*.jpg` until
+"Chụp lại" is tapped.

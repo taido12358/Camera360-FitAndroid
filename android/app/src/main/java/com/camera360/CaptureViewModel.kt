@@ -417,6 +417,8 @@ class CaptureViewModel : ViewModel() {
                 var fovUsed = hFov
                 var fovNote: String? = null
                 var coverageNote: String? = null
+                var registrationMs = 0L
+                var unreadable = 0
 
                 withContext(Dispatchers.Default) {
                     // 1) small grayscale copies + gravity for every usable shot
@@ -425,14 +427,17 @@ class CaptureViewModel : ViewModel() {
                     for ((k, shot) in shots.withIndex()) {
                         val up = shot.gravityUp
                         val g = if (up == null) null else loadGray(File(shot.filePath), up)
-                        if (g != null) { usableShots.add(shot); gray.add(g) } else dropped++
+                        if (g != null) { usableShots.add(shot); gray.add(g) } else { dropped++; unreadable++ }
                         _state.value = _state.value.copy(stitchProgress = 0.05f * (k + 1) / shots.size)
                     }
                     if (gray.size < 2) throw IllegalStateException("Không đọc được đủ ảnh để ghép")
 
                     // 2) heading of each photo from image registration
                     // Also checks the measured FOV against the photos (loop closure) and corrects it if clearly wrong.
-                    val calibrated = YawRegistration.estimateHeadingsCalibrated(gray, hFov)
+                    val phaseLines = ArrayList<String>()
+                    val regStart = System.nanoTime()
+                    val calibrated = YawRegistration.estimateHeadingsCalibrated(gray, hFov) { phaseLines.add(it) }
+                    registrationMs = (System.nanoTime() - regStart) / 1_000_000
                     val reg = calibrated.result
                     fovUsed = calibrated.fovDeg
                     if (calibrated.fovAdjusted) {
@@ -452,9 +457,15 @@ class CaptureViewModel : ViewModel() {
 
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
+                    val stitchStart = System.nanoTime()
                     val cov = StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
                         _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
                     }
+                    val stitchMs = (System.nanoTime() - stitchStart) / 1_000_000
+                    writeDiagnostics(
+                        context, usableShots, reg, hFov, fovUsed, calibrated.fovAdjusted, cov,
+                        unreadable, registrationMs, stitchMs, phaseLines
+                    )
                     if (cov.largestGapDeg >= COVERAGE_GAP_NOTICE_DEG) {
                         coverageNote = "Ảnh phủ ${(cov.coveredFraction * 100).toInt()}% vòng ngang, còn hở khoảng ${cov.largestGapDeg.roundToInt()}° — " +
                             "chụp thêm ở hướng còn trống nếu muốn đủ 360°"
@@ -485,6 +496,35 @@ class CaptureViewModel : ViewModel() {
                 Log.e("CaptureVM", "Manual stitching failed", e)
                 _state.value = _state.value.copy(isStitching = false, stitchError = e.message ?: "Lỗi ghép ảnh")
             }
+        }
+    }
+
+    /** Writes the last manual session's diagnostics where it can be pulled with adb (never leaves the device). */
+    private fun writeDiagnostics(
+        context: Context,
+        shots: List<ManualShot>,
+        reg: YawRegistration.Result,
+        fovMeasured: Double,
+        fovUsed: Double,
+        fovAdjusted: Boolean,
+        coverage: CoverageStats.Azimuth?,
+        unreadable: Int,
+        registrationMs: Long,
+        stitchMs: Long,
+        phases: List<String>
+    ) {
+        try {
+            val text = SessionDiagnostics.format(
+                photoNames = shots.map { File(it.filePath).name },
+                gravityUp = shots.map { it.gravityUp ?: floatArrayOf(0f, 1f, 0f) },
+                registration = reg,
+                fovMeasuredDeg = fovMeasured, fovUsedDeg = fovUsed, fovAdjusted = fovAdjusted,
+                coverage = coverage, unreadablePhotos = unreadable,
+                registrationMs = registrationMs, stitchMs = stitchMs, timingLines = phases
+            )
+            File(context.filesDir, "last_session_diagnostics.txt").writeText(text)
+        } catch (e: Exception) {
+            Log.w("CaptureVM", "Could not write diagnostics", e)
         }
     }
 
