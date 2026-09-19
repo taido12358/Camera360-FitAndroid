@@ -37,6 +37,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -252,6 +254,10 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
         viewModel.startAutoCapture(imageCapture, context)
     }
 
+    // In-app panorama viewer, opened from the completion card and closed automatically on a new session.
+    var viewerOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(state.stitchedFilePath) { if (state.stitchedFilePath == null) viewerOpen = false }
+
     Box(modifier = Modifier.fillMaxSize()) {
 
         // ── Camera preview ────────────────────────────────────────────────
@@ -405,6 +411,7 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
 
                 // Panorama ready — show open-gallery button
                 state.stitchedFilePath != null -> StitchCompleteUI(
+                    onView = { viewerOpen = true },
                     onOpenGallery = {
                         val intent = Intent(Intent.ACTION_VIEW).apply {
                             type = "image/jpeg"
@@ -465,6 +472,10 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                 Text(text = note, color = Color.White, fontSize = 12.sp)
             }
         }
+
+        // Last child = drawn on top of everything else
+        val panoPath = state.stitchedFilePath
+        if (viewerOpen && panoPath != null) PanoramaViewer(path = panoPath, onClose = { viewerOpen = false })
     }
 }
 
@@ -767,7 +778,7 @@ private fun StitchingProgressUI(progress: Float) {
 }
 
 @Composable
-private fun StitchCompleteUI(onOpenGallery: () -> Unit, onReset: () -> Unit) {
+private fun StitchCompleteUI(onView: () -> Unit, onOpenGallery: () -> Unit, onReset: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -784,6 +795,14 @@ private fun StitchCompleteUI(onOpenGallery: () -> Unit, onReset: () -> Unit) {
             Box(
                 modifier = Modifier
                     .background(Color(0xFF4CAF50), RoundedCornerShape(10.dp))
+                    .clickable(onClick = onView)
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Text("Xem ảnh", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+            Box(
+                modifier = Modifier
+                    .background(Color.White.copy(alpha = 0.22f), RoundedCornerShape(10.dp))
                     .clickable(onClick = onOpenGallery)
                     .padding(horizontal = 18.dp, vertical = 10.dp)
             ) {

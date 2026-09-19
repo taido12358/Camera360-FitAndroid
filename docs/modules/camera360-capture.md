@@ -100,3 +100,11 @@ are what hurt registration most. The 50 Hz gravity stream is kept out of
 `CaptureState`; only rounded tilt/roll/steady changes are published, and the
 shutter reads the newest vector directly (`latestUp`). Verified on the Galaxy
 A12 lying flat: "Ngang -86, Nghieng 0, da giu yen".
+
+## In-app panorama viewer (2026-09-20)
+
+The completion card now has "Xem ảnh" (opens `PanoramaViewer`: full screen,
+pinch-zoom up to 8x, drag to pan, double-tap to reset, width capped at 4096 px
+when decoding), "Mở Thư viện" and "Chụp lại". The old gallery intent carried no
+image URI, so it could not be relied on to show the panorama. Verified on the
+emulator.
