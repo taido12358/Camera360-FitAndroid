@@ -19,3 +19,20 @@
   apply the azimuth/pitch smoothing to it. It exists specifically for
   accurate stitching pose (`StitchingEngine`); azimuth/pitch stay smoothed
   for on-screen guidance only. Keep these two uses separate.
+
+## Azimuth/pitch convention (added 2026-09-19, verified on emulator)
+
+- `DeviceOrientation.azimuth`/`pitch` are the **back camera's forward
+  direction**: azimuth = compass heading (0° = north, clockwise), pitch =
+  elevation (0° = horizon, +90° = straight up). They are derived from
+  `-column 2` of the rotation matrix, in the ENU world frame.
+- Do **not** use `SensorManager.getOrientation()` for these: its pitch is the
+  tilt of the phone's Y axis (≈ -90° when the phone is held upright with the
+  camera at the horizon) and its azimuth is degenerate in that exact pose.
+  Frame targets (-35°/0°/+35°) and `projectToScreen` assume camera elevation.
+- The rotation matrix's world frame is ENU (x=E, y=N, z=Up). `StitchingEngine`
+  builds world directions as (E, Up, N), so `cameraBasisFromRotationMatrix`
+  swaps components 1 and 2 of each basis vector. Keep both sides in sync.
+- Emulator testing: `adb emu sensor set orientation` does NOT move the
+  rotation vector. Drive `acceleration` + `magnetic-field` instead (the fused
+  rotation vector is computed from them).

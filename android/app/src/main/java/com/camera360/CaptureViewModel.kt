@@ -75,6 +75,12 @@ data class CaptureState(
     // Measured from the bound camera's real CameraCharacteristics when available
     // (see CaptureScreen) — falls back to StitchingEngine.CAMERA_HFOV_DEG if null.
     val measuredHFovDeg: Double? = null,
+    // null = not yet determined (checked once at sensor start-up); false = the
+    // device has no rotation-vector sensor — auto-capture, alignment guidance
+    // and stitching (which requires a per-frame pose) are all unavailable, so
+    // the UI must fall back to manual-shutter mode and say so explicitly
+    // rather than silently degrading (see CaptureViewModel.ensureGyroscopeChecked).
+    val hasGyroscope: Boolean? = null,
     val frames: List<FrameTarget> = generateFrames(),
     // Auto-capture: 0..1 progress while holding alignment steady, for UI feedback.
     val holdProgress: Float = 0f,
@@ -99,6 +105,11 @@ data class CaptureState(
 
     val isAligned: Boolean
         get() {
+            // Without a gyroscope, currentAzimuth/currentPitch never move off
+            // their initial (0,0) default, so "alignment" would otherwise be
+            // spuriously true whenever a target happens to sit near (0,0) —
+            // refuse to report alignment when we have no real orientation data.
+            if (hasGyroscope != true) return false
             val i = nearestUncapturedIndex
             if (i < 0) return false
             return angularDist(currentAzimuth, currentPitch, frames[i].azimuth, frames[i].pitch) < ALIGNMENT_THRESHOLD_DEG
@@ -112,6 +123,9 @@ data class CaptureState(
 
     val directionHint: String
         get() {
+            // Same reasoning as isAligned above — a frozen (0,0) reading isn't
+            // real guidance and would just mislead the user.
+            if (hasGyroscope != true) return ""
             val i = nearestUncapturedIndex
             if (i < 0) return ""
             val f = frames[i]
@@ -149,9 +163,30 @@ class CaptureViewModel : ViewModel() {
     private val executor = Executors.newSingleThreadExecutor()
     private var autoCaptureJob: Job? = null
 
+    // Cached result of the gyroscope presence check — computed once (see
+    // ensureGyroscopeChecked) so startSensor/startAutoCapture agree on it
+    // regardless of which one runs first from CaptureScreen's LaunchedEffects.
+    private var hasGyroscope: Boolean? = null
+
+    /**
+     * Determines once whether this device has a rotation-vector sensor and
+     * publishes it to [CaptureState.hasGyroscope] so the UI can show a clear
+     * "no gyroscope — manual mode" message instead of silently degrading
+     * (auto-capture misfiring off a frozen orientation, stitching failing
+     * only after all 24 frames are manually captured).
+     */
+    private fun ensureGyroscopeChecked(context: Context): Boolean {
+        hasGyroscope?.let { return it }
+        val present = GyroscopeManager(context.applicationContext).hasGyroscope
+        hasGyroscope = present
+        _state.value = _state.value.copy(hasGyroscope = present)
+        return present
+    }
+
     fun startSensor(context: Context) {
+        if (!ensureGyroscopeChecked(context)) return
         viewModelScope.launch {
-            GyroscopeManager(context).orientationFlow().collect { o ->
+            GyroscopeManager(context.applicationContext).orientationFlow().collect { o ->
                 _state.value = _state.value.copy(
                     currentAzimuth = o.azimuth,
                     currentPitch = o.pitch,
@@ -174,6 +209,12 @@ class CaptureViewModel : ViewModel() {
      * (e.g. from recomposition); only the first call starts the loop.
      */
     fun startAutoCapture(imageCapture: ImageCapture, context: Context) {
+        // No gyroscope → no reliable orientation, so there's nothing to
+        // "align" to and no pose to record for stitching. Leave the user on
+        // manual-shutter mode (see CaptureState.hasGyroscope / CaptureScreen)
+        // instead of running a loop that would otherwise fire off a frozen
+        // (0,0) reading.
+        if (!ensureGyroscopeChecked(context)) return
         if (autoCaptureJob != null) return
         autoCaptureJob = viewModelScope.launch {
             var alignedSinceMs = -1L
@@ -253,6 +294,15 @@ class CaptureViewModel : ViewModel() {
         val s = _state.value
         if (!s.allCaptured || s.isStitching) return
 
+        // Stitching needs a per-frame device pose (rotation matrix) for every
+        // shot; without a gyroscope none of the captured frames have one.
+        // Fail fast with a clear, specific reason instead of falling through
+        // to the generic "missing frames" message below.
+        if (s.hasGyroscope == false) {
+            _state.value = s.copy(stitchError = "Thiết bị không có cảm biến con quay hồi chuyển — không thể ghép panorama tự động")
+            return
+        }
+
         val inputs = s.frames.mapNotNull { f ->
             val path = f.filePath ?: return@mapNotNull null
             val file = File(path)
@@ -297,7 +347,15 @@ class CaptureViewModel : ViewModel() {
     }
 
     fun resetForNewSession() {
-        _state.value = CaptureState()
+        // Preserve the already-determined gyroscope presence (and the last
+        // measured FOV) across a reset — re-running ensureGyroscopeChecked
+        // would short-circuit on the cached `hasGyroscope` field and never
+        // republish it to the fresh CaptureState, leaving the banner/guard
+        // logic thinking it's still "unknown".
+        _state.value = CaptureState(
+            hasGyroscope = hasGyroscope,
+            measuredHFovDeg = _state.value.measuredHFovDeg
+        )
     }
 
     private fun copyToGallery(context: Context, source: File, displayName: String) {

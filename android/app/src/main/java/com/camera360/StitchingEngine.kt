@@ -65,9 +65,15 @@ object StitchingEngine {
         // Right_world  = R * (1,0,0) = column 0 of R
         // Up_world     = R * (0,1,0) = column 1 of R
         // Fwd_world    = R * (0,0,-1) = -column 2 of R  (back lens points opposite the screen normal)
-        val right = doubleArrayOf(r[0].toDouble(), r[3].toDouble(), r[6].toDouble())
-        val up = doubleArrayOf(r[1].toDouble(), r[4].toDouble(), r[7].toDouble())
-        val fwd = doubleArrayOf(-r[2].toDouble(), -r[5].toDouble(), -r[8].toDouble())
+        //
+        // The sensor's world frame is ENU (x=East, y=North, z=Up), but the
+        // projection loop below builds its world directions as
+        // (x=East, y=Up, z=North) — so swap components 1 and 2 of every basis
+        // vector, otherwise the panorama's vertical axis would map to North
+        // instead of Up.
+        val right = doubleArrayOf(r[0].toDouble(), r[6].toDouble(), r[3].toDouble())
+        val up = doubleArrayOf(r[1].toDouble(), r[7].toDouble(), r[4].toDouble())
+        val fwd = doubleArrayOf(-r[2].toDouble(), -r[8].toDouble(), -r[5].toDouble())
         return Triple(right, up, fwd)
     }
 
@@ -102,6 +108,7 @@ object StitchingEngine {
                     ?: return@mapNotNull null
 
                 val sw = bmp.width; val sh = bmp.height
+                if (sw <= 0 || sh <= 0) { bmp.recycle(); return@mapNotNull null }
                 val pixels = IntArray(sw * sh)
                 bmp.getPixels(pixels, 0, sw, 0, 0, sw, sh)
                 bmp.recycle()

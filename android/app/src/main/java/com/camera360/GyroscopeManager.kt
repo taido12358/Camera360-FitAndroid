@@ -8,6 +8,8 @@ import android.hardware.SensorManager
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlin.math.asin
+import kotlin.math.atan2
 
 /**
  * [rotationMatrix] is the raw (unsmoothed) device→world rotation matrix from
@@ -33,7 +35,6 @@ class GyroscopeManager(context: Context) {
     fun orientationFlow(): Flow<DeviceOrientation> = callbackFlow {
         val sensor = rotationSensor ?: run { close(); return@callbackFlow }
         val rotMatrix = FloatArray(9)
-        val angles = FloatArray(3)
 
         var smoothAz = -1f
         var smoothPitch = 0f
@@ -42,10 +43,20 @@ class GyroscopeManager(context: Context) {
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
-                SensorManager.getOrientation(rotMatrix, angles)
 
-                val rawAz = ((Math.toDegrees(angles[0].toDouble()).toFloat() + 360f) % 360f)
-                val rawPitch = Math.toDegrees(angles[1].toDouble()).toFloat()
+                // Direction the back camera points, in the world ENU frame
+                // (x=East, y=North, z=Up): device -Z axis = -(column 2 of R).
+                // NOT SensorManager.getOrientation(): its pitch is the tilt of
+                // the phone's *Y axis* (≈ -90° with the phone held upright and
+                // the camera at the horizon) and its azimuth is degenerate in
+                // exactly that upright pose. Camera-forward azimuth/elevation
+                // is well-defined, with 0° = horizon and +90° = straight up,
+                // which is what the frame targets and the AR overlay expect.
+                val fE = -rotMatrix[2].toDouble()
+                val fN = -rotMatrix[5].toDouble()
+                val fU = -rotMatrix[8].toDouble()
+                val rawAz = ((Math.toDegrees(atan2(fE, fN)).toFloat() + 360f) % 360f)
+                val rawPitch = Math.toDegrees(asin(fU.coerceIn(-1.0, 1.0))).toFloat()
 
                 if (smoothAz < 0f) {
                     smoothAz = rawAz

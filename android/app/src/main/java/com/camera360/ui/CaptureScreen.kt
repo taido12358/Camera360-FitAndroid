@@ -119,15 +119,25 @@ private fun projectToScreen(
  * accurate projection. Returns null if the device doesn't report the needed
  * characteristics.
  */
-@OptIn(ExperimentalCamera2Interop::class)
+// Uses androidx.annotation.OptIn (fully-qualified), not kotlin.OptIn: CameraX's
+// experimental markers are androidx.annotation.RequiresOptIn-based, which Android
+// Lint's UnsafeOptInUsageError check only recognizes via the AndroidX OptIn
+// annotation — kotlin.OptIn compiles (with a "has no effect" warning) but doesn't
+// satisfy lint, so assembling would compile fine yet `lint`/`lintDebug` would fail.
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 private fun measureHorizontalFovDeg(camera: androidx.camera.core.Camera): Double? {
     return try {
         val chars = Camera2CameraInfo.from(camera.cameraInfo)
         val focalLengths = chars.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
         val sensorSize = chars.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
         val focal = focalLengths?.firstOrNull()
-        if (focal == null || focal <= 0f || sensorSize == null) return null
-        Math.toDegrees(2.0 * atan((sensorSize.width / (2.0 * focal)).toDouble()))
+        if (focal == null || focal <= 0f || sensorSize == null || sensorSize.width <= 0f) return null
+        val fov = Math.toDegrees(2.0 * atan((sensorSize.width / (2.0 * focal)).toDouble()))
+        // Guard against a degenerate (NaN/zero/negative) result feeding a
+        // tan(hFov/2) == 0 divide in projectToScreen's focalLen calculation,
+        // which would otherwise blow up dot positions to Infinity/NaN.
+        if (fov.isNaN() || fov <= 0.0) return null
+        fov
     } catch (e: Exception) {
         null
     }
@@ -204,19 +214,50 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
         )
 
         // ── 3D sphere guide: 24 world-fixed dots projected onto screen ────
-        val textMeasurer = rememberTextMeasurer()
-        SphereGuideOverlay(
-            modifier = Modifier.fillMaxSize(),
-            state = state,
-            textMeasurer = textMeasurer
-        )
+        // Skipped when there's no gyroscope: without real orientation data the
+        // dots can't actually track device movement, so drawing them would
+        // just be a misleading "AR" overlay that never moves as you turn.
+        if (state.hasGyroscope != false) {
+            val textMeasurer = rememberTextMeasurer()
+            SphereGuideOverlay(
+                modifier = Modifier.fillMaxSize(),
+                state = state,
+                textMeasurer = textMeasurer
+            )
+        }
+
+        // ── No-gyroscope banner — always visible in manual mode so the user
+        // understands up front why auto-capture/AR guidance are unavailable,
+        // instead of only discovering it after capturing all 24 frames and
+        // hitting a stitch error (see CaptureViewModel.ensureGyroscopeChecked). ──
+        if (state.hasGyroscope == false) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .fillMaxWidth()
+                    .background(Color(0xFFB00020).copy(alpha = 0.92f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "Thiết bị không có cảm biến con quay hồi chuyển — chỉ hỗ trợ chụp thủ công, " +
+                        "không thể tự động căn chỉnh hoặc ghép panorama.",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
 
         // ── Top HUD: total + per-row progress ────────────────────────────
+        // Pushed down when the no-gyroscope banner above is showing so the two don't overlap.
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 12.dp)
+                .padding(top = if (state.hasGyroscope == false) 52.dp else 12.dp)
                 .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(14.dp))
                 .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
@@ -313,6 +354,13 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                         }
                         context.startActivity(intent)
                     },
+                    onReset = { viewModel.resetForNewSession() }
+                )
+
+                // All frames captured, but stitching needs per-frame gyroscope
+                // poses this device doesn't have — say so plainly instead of
+                // letting the user tap "Stitch" into the same error.
+                state.allCaptured && state.hasGyroscope == false -> NoGyroscopeStitchUnavailableUI(
                     onReset = { viewModel.resetForNewSession() }
                 )
 
@@ -507,6 +555,28 @@ private fun StitchPromptUI(onStitch: () -> Unit) {
                 .padding(horizontal = 28.dp, vertical = 14.dp)
         ) {
             Text("Ghép Panorama 360°", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun NoGyroscopeStitchUnavailableUI(onReset: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            "24/24 ảnh đã chụp, nhưng thiết bị không có cảm biến\ncon quay hồi chuyển nên không thể ghép panorama.",
+            color = Color(0xFFFFEB3B),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Box(
+            modifier = Modifier
+                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                .clickable(onClick = onReset)
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            Text("Chụp lại", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
