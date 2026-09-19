@@ -1,6 +1,28 @@
 package com.camera360
 
 /**
+ * Largest circular run of `false` in [colOk] as (start column, length); length 0 when there is none.
+ * Needs at least one `true` so the scan can start on a covered column and runs are never split by the array
+ * boundary. Shared by [CoverageCrop] and [CoverageStats].
+ */
+internal fun largestCircularGap(colOk: BooleanArray): Pair<Int, Int> {
+    val w = colOk.size
+    val first = colOk.indexOfFirst { it }
+    if (first < 0) return -1 to w
+    var bestStart = -1; var bestLen = 0
+    var i = 0
+    while (i < w) {
+        val col = (first + i) % w
+        if (!colOk[col]) {
+            var len = 0
+            while (i < w && !colOk[(first + i) % w]) { len++; i++ }
+            if (len > bestLen) { bestLen = len; bestStart = col }
+        } else i++
+    }
+    return bestStart to bestLen
+}
+
+/**
  * Crop rectangle for an equirectangular render that only covers part of the
  * sphere (e.g. a hand-held sweep of a few dozen photos). The horizontal axis is
  * azimuth, so it **wraps**: the crop may start near the right edge and continue
@@ -47,21 +69,7 @@ object CoverageCrop {
         if (colCovered.none { it }) return null
 
         // Largest circular run of uncovered columns is the part to cut away.
-        var bestGapStart = -1; var bestGapLen = 0
-        var x = 0
-        // start scanning at a covered column so runs are never split by the array boundary
-        val first = colCovered.indexOfFirst { it }
-        var i = 0
-        while (i < w) {
-            val col = (first + i) % w
-            if (!colCovered[col]) {
-                val start = col
-                var len = 0
-                while (i < w && !colCovered[(first + i) % w]) { len++; i++ }
-                if (len > bestGapLen) { bestGapLen = len; bestGapStart = start }
-            } else i++
-        }
-        x = 0
+        val (bestGapStart, bestGapLen) = largestCircularGap(colCovered)
         if (bestGapLen == 0) return Bounds(0, w, y0, y1 - y0 + 1)   // full azimuth coverage
 
         val keep = minOf(w, w - bestGapLen + 2 * pad)
@@ -99,16 +107,7 @@ object CoverageStats {
         if (coveredCols == 0) return Azimuth(0.0, 360.0)
         if (coveredCols == w) return Azimuth(1.0, 0.0)
 
-        val first = colOk.indexOfFirst { it }
-        var largest = 0
-        var i = 0
-        while (i < w) {
-            if (!colOk[(first + i) % w]) {
-                var len = 0
-                while (i < w && !colOk[(first + i) % w]) { len++; i++ }
-                if (len > largest) largest = len
-            } else i++
-        }
+        val largest = largestCircularGap(colOk).second
         return Azimuth(coveredCols.toDouble() / w, largest * 360.0 / w)
     }
 }

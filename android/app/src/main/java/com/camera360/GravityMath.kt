@@ -18,8 +18,9 @@ object GravityMath {
         Math.toDegrees(asin((-up[2]).toDouble().coerceIn(-1.0, 1.0))).toFloat()
 
     /**
-     * Roll about the camera axis: 0 when the phone is upright in portrait (screen top toward the sky),
-     * positive when tipped toward its right edge. Undefined (returns 0) when the camera points nearly
+     * Roll about the camera axis: 0 when the phone is upright in portrait (screen top toward the sky);
+     * NEGATIVE when the right edge is tipped down (world-up then points toward the left edge, up[0] < 0), positive
+     * when the left edge is tipped down. Undefined (returns 0) when the camera points nearly
      * straight up/down, where roll has no meaning.
      */
     fun rollDeg(up: FloatArray): Float {

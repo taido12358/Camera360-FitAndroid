@@ -5,6 +5,8 @@ import android.content.Intent
 import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Build
+import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
@@ -257,6 +259,7 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
     // In-app panorama viewer, opened from the completion card and closed automatically on a new session.
     var viewerOpen by remember { mutableStateOf(false) }
     LaunchedEffect(state.stitchedFilePath) { if (state.stitchedFilePath == null) viewerOpen = false }
+    BackHandler(enabled = viewerOpen) { viewerOpen = false }       // Back closes the viewer instead of leaving the app
 
     Box(modifier = Modifier.fillMaxSize()) {
 
@@ -272,15 +275,21 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                 }.also { pv ->
                     val future = ProcessCameraProvider.getInstance(ctx)
                     future.addListener({
-                        val provider = future.get()
-                        val preview = Preview.Builder().build()
-                            .also { it.surfaceProvider = pv.surfaceProvider }
                         try {
+                            val provider = future.get()
+                            val preview = Preview.Builder().build()
+                                .also { it.surfaceProvider = pv.surfaceProvider }
                             provider.unbindAll()
                             val camera = provider.bindToLifecycle(lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
-                            measureHorizontalFovDeg(camera)?.let { viewModel.setMeasuredHFov(it) }
-                        } catch (_: Exception) {}
+                            val fov = measureHorizontalFovDeg(camera)
+                            if (fov != null) viewModel.setMeasuredHFov(fov)
+                            else Log.w("CaptureScreen", "FOV could not be measured; using the built-in default")
+                        } catch (e: Exception) {
+                            // A black preview with no explanation is the worst failure mode: say what happened.
+                            Log.e("CaptureScreen", "Camera could not be started", e)
+                            viewModel.reportError("Không mở được camera: ${e.message ?: e.javaClass.simpleName}")
+                        }
                     }, ContextCompat.getMainExecutor(ctx))
                 }
             },
@@ -413,11 +422,17 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                 state.stitchedFilePath != null -> StitchCompleteUI(
                     onView = { viewerOpen = true },
                     onOpenGallery = {
-                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                            type = "image/jpeg"
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        // Point at the saved panorama itself; a data-less VIEW intent could crash or open the wrong thing.
+                        val uri = state.galleryUri
+                        if (uri == null) viewerOpen = true else try {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW)
+                                    .setDataAndType(Uri.parse(uri), "image/jpeg")
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (e: Exception) {
+                            viewerOpen = true          // no gallery app can open it: show it in the app instead
                         }
-                        context.startActivity(intent)
                     },
                     onReset = { viewModel.resetForNewSession() }
                 )

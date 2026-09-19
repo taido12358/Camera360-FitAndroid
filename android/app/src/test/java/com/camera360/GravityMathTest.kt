@@ -57,6 +57,13 @@ class GravityMathTest {
         assertTrue("steady again after holding still at the new pose", steady)
     }
 
+    @Test fun rollSign_isNegativeWhenTheRightEdgeIsTippedDown() {
+        // right edge lower: gravity pulls toward +x, so world-up in device coordinates points toward -x
+        val upRightEdgeDown = floatArrayOf(-0.1736f, 0.9848f, 0f)          // ~10 deg
+        assertEquals(-10.0, GravityMath.rollDeg(upRightEdgeDown).toDouble(), 0.1)
+        assertEquals(10.0, GravityMath.rollDeg(floatArrayOf(0.1736f, 0.9848f, 0f)).toDouble(), 0.1)
+    }
+
     @Test fun rollLimit() {
         assertTrue(GravityMath.isRollAcceptable(5f))
         assertFalse(GravityMath.isRollAcceptable(-14f))

@@ -66,10 +66,10 @@ object GainCompensation {
         // Frames without any overlap keep their gain of exactly 1 and are left out.
         val overlapping = (0 until n).filter { i -> (0 until n).any { j -> j != i && count[i][j] > 0.0 } }
         if (overlapping.isEmpty()) return clamped
-        val mean = overlapping.map { clamped[it] }.average()
-        if (mean <= 0.0 || mean.isNaN()) return clamped
+        val avg = overlapping.map { clamped[it] }.average()
+        if (avg <= 0.0 || avg.isNaN()) return clamped
         return DoubleArray(n) { i ->
-            if (i in overlapping) (clamped[i] / mean).coerceIn(MIN_GAIN, MAX_GAIN) else clamped[i]
+            if (i in overlapping) (clamped[i] / avg).coerceIn(MIN_GAIN, MAX_GAIN) else clamped[i]
         }
     }
 

@@ -125,3 +125,24 @@ in `dumpsys window`: window flags went from `fl=81810100` to `81810180`).
 The first attempt, `PreviewView.keepScreenOn = true`, never showed up in the
 window flags on the test phone, so it was replaced. A sweep takes minutes and
 stitching ~25 s; on the test phone the screen otherwise dims and re-locks.
+
+## Second code-review round (2026-09-20) - UI / engine findings fixed
+
+- **Back** now closes the in-app viewer (`BackHandler`) instead of leaving the app.
+- **Viewer gestures**: pan followed the finger at `scale`x and the clamp was a fixed
+  pixel value; now translation is 1:1, zoom pivots on the pinch centroid and the
+  clamp derives from the view size (no drag-off at scale 1).
+- **"Mở Thư viện"** used a data-less VIEW intent (could crash / open nothing): the
+  saved panorama's MediaStore Uri (`galleryUri`) is opened, with a fallback to the
+  in-app viewer if no gallery app can. Verified on the emulator: it opens the
+  panorama itself in Google Photos.
+- **Stitch while a shot is being written** is refused (`isCapturing`), so a shot can
+  no longer be missing from the panorama.
+- **Camera binding failures** are reported ("Không mở được camera: ...") instead of a
+  silent black preview; FOV-measurement failure is logged.
+- **`Bitmap.compress` failure** (full disk) now throws instead of reporting a
+  saved panorama; **undecodable frames** are counted and reported
+  (`StitchOutcome.framesFailed`) instead of silently leaving a hole.
+- Cleanups: `largestCircularGap` shared by `CoverageCrop`/`CoverageStats`, shadowed
+  variable in `GainCompensation`, and `GravityMath.rollDeg` docs corrected (negative
+  when the right edge is tipped down; sign now pinned by a test).

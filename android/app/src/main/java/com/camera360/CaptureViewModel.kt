@@ -115,6 +115,8 @@ data class CaptureState(
     val isStitching: Boolean = false,
     val stitchProgress: Float = 0f,
     val stitchedFilePath: String? = null,
+    // Gallery Uri of the saved panorama (Android 10+), so "open in gallery" can point at it.
+    val galleryUri: String? = null,
     val stitchError: String? = null
 ) {
     val nearestUncapturedIndex: Int
@@ -426,7 +428,7 @@ class CaptureViewModel : ViewModel() {
      */
     private fun stitchManual(context: Context) {
         val s = _state.value
-        if (s.isStitching) return
+        if (s.isStitching || s.isCapturing) return          // a shot still being written would be missing from the panorama
         val shots = s.manualShots
         if (shots.size < 2) {
             _state.value = s.copy(stitchError = "Cần ít nhất 2 ảnh chồng lấn nhau để ghép")
@@ -441,6 +443,7 @@ class CaptureViewModel : ViewModel() {
                 var dropped = 0
                 var fovUsed = hFov
                 var fovNote: String? = null
+                var galleryUri: String? = null
                 var coverageNote: String? = null
                 var registrationMs = 0L
                 var unreadable = 0
@@ -486,25 +489,28 @@ class CaptureViewModel : ViewModel() {
                     // 3) pose-driven rendering (with exposure compensation)
                     val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
                     val stitchStart = System.nanoTime()
-                    val cov = StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
+                    val outcome = StitchingEngine.stitch(inputs, outputFile, hFovDeg = fovUsed, cropToContent = true) { p ->
                         _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
                     }
                     val stitchMs = (System.nanoTime() - stitchStart) / 1_000_000
+                    val cov = outcome.coverage
+                    dropped += outcome.framesFailed
                     writeDiagnostics(
                         context, usableShots, reg, hFov, fovUsed, calibrated.fovAdjusted, cov,
-                        unreadable, registrationMs, stitchMs, phaseLines
+                        unreadable + outcome.framesFailed, registrationMs, stitchMs, phaseLines
                     )
                     if (cov.largestGapDeg >= COVERAGE_GAP_NOTICE_DEG) {
                         coverageNote = "Ảnh phủ ${(cov.coveredFraction * 100).toInt()}% vòng ngang, còn hở khoảng ${cov.largestGapDeg.roundToInt()}° — " +
                             "chụp thêm ở hướng còn trống nếu muốn đủ 360°"
                     }
-                    copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")
+                    galleryUri = copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")
                 }
 
                 _state.value = _state.value.copy(
                     isStitching = false,
                     stitchProgress = 1f,
                     stitchedFilePath = outputFile.absolutePath,
+                    galleryUri = galleryUri,
                     stitchNotice = listOfNotNull(
                         if (dropped > 0) "Đã bỏ $dropped ảnh không đủ phần chung với các ảnh còn lại" else null,
                         coverageNote,
@@ -577,7 +583,7 @@ class CaptureViewModel : ViewModel() {
             return
         }
         val s = _state.value
-        if (!s.allCaptured || s.isStitching) return
+        if (!s.allCaptured || s.isStitching || s.isCapturing) return
 
         // Stitching needs a per-frame device pose (rotation matrix) for every
         // shot; without a gyroscope none of the captured frames have one.
@@ -607,6 +613,7 @@ class CaptureViewModel : ViewModel() {
             try {
                 val outputFile = File(context.filesDir, "panorama_${System.currentTimeMillis()}.jpg")
                 val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
+                var galleryUri: String? = null
 
                 withContext(Dispatchers.Default) {        // CPU-bound (registration + rendering), not I/O
                     _state.update { it.copy(stitchProgress = 0.02f) }
@@ -634,13 +641,14 @@ class CaptureViewModel : ViewModel() {
                         _state.value = _state.value.copy(stitchProgress = 0.25f + 0.75f * progress)
                     }
                     val panoramaName = "Camera360_panorama_${System.currentTimeMillis()}.jpg"
-                    copyToGallery(context, outputFile, panoramaName)
+                    galleryUri = copyToGallery(context, outputFile, panoramaName)
                 }
 
                 _state.value = _state.value.copy(
                     isStitching = false,
                     stitchProgress = 1f,
-                    stitchedFilePath = outputFile.absolutePath
+                    stitchedFilePath = outputFile.absolutePath,
+                    galleryUri = galleryUri
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -689,20 +697,22 @@ class CaptureViewModel : ViewModel() {
         )
     }
 
-    private fun copyToGallery(context: Context, source: File, displayName: String) {
-        try {
+    /** Copies [source] into DCIM/Camera360; returns the gallery Uri (Android 10+) so it can be opened, else null. */
+    private fun copyToGallery(context: Context, source: File, displayName: String): String? {
+        return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val cv = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
                     put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                     put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Camera360")
                 }
-                context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
-                    ?.let { uri ->
-                        context.contentResolver.openOutputStream(uri)?.use { out ->
-                            source.inputStream().use { inp -> inp.copyTo(out) }
-                        }
+                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+                uri?.let {
+                    context.contentResolver.openOutputStream(it)?.use { out ->
+                        source.inputStream().use { inp -> inp.copyTo(out) }
                     }
+                }
+                uri?.toString()
             } else {
                 @Suppress("DEPRECATION")
                 val galleryDir = File(
@@ -712,10 +722,17 @@ class CaptureViewModel : ViewModel() {
                 val dest = File(galleryDir, displayName)
                 source.copyTo(dest, overwrite = true)
                 MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), arrayOf("image/jpeg"), null)
+                null
             }
         } catch (e: Exception) {
             Log.e("CaptureVM", "Gallery copy failed", e)
+            null
         }
+    }
+
+    /** Shows [message] in the error banner (used by the UI for problems only it can see, e.g. camera binding). */
+    fun reportError(message: String) {
+        _state.update { it.copy(lastError = message) }
     }
 
     override fun onCleared() {

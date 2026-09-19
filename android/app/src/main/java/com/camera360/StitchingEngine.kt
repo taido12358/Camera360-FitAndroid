@@ -46,6 +46,9 @@ object StitchingEngine {
         val rotationMatrix: FloatArray
     )
 
+    /** What a stitch produced: horizontal coverage plus how many input frames were rendered / could not be decoded. */
+    data class StitchOutcome(val coverage: CoverageStats.Azimuth, val framesUsed: Int, val framesFailed: Int)
+
     /**
      * Stitch [inputs] into an equirectangular JPEG at [outputFile], using
      * [hFovDeg] as the camera's field of view along the sensor's LONG side
@@ -55,7 +58,8 @@ object StitchingEngine {
      * the short side is derived from the frame's pixel aspect ratio, so this
      * works for whatever orientation the frame ends up in after EXIF rotation.
      * [onProgress] is called with 0..1 from worker threads — safe to update StateFlow.
-     * Returns how much of the horizontal circle the panorama covers (for "shoot more here" advice).
+     * Returns the horizontal coverage (for "shoot more here" advice) and the number of frames that could
+     * not be decoded (so a hole in the picture is explained, not silent).
      */
     suspend fun stitch(
         inputs: List<FrameInput>,
@@ -63,25 +67,30 @@ object StitchingEngine {
         hFovDeg: Double = CAMERA_HFOV_DEG,
         cropToContent: Boolean = false,
         onProgress: (Float) -> Unit
-    ): CoverageStats.Azimuth = withContext(Dispatchers.IO) {
+    ): StitchOutcome = withContext(Dispatchers.IO) {
         onProgress(0f)
 
         // ── Load frames at reduced resolution ──────────────────────────────
-        val frames = inputs.mapNotNull { input ->
+        val decoded = inputs.map { input ->
             try {
                 // Decoded, EXIF-rotated upright (CameraX stores sensor-oriented pixels plus a rotation tag, and
                 // the stitching basis assumes an upright portrait frame) and scaled to a bounded size.
-                val bmp = ImageIo.loadUpright(input.file, MAX_FRAME_LONG_SIDE) ?: return@mapNotNull null
+                val bmp = ImageIo.loadUpright(input.file, MAX_FRAME_LONG_SIDE) ?: return@map null
 
                 val sw = bmp.width; val sh = bmp.height
-                if (sw <= 0 || sh <= 0) { bmp.recycle(); return@mapNotNull null }
+                if (sw <= 0 || sh <= 0) { bmp.recycle(); return@map null }
                 val pixels = IntArray(sw * sh)
                 bmp.getPixels(pixels, 0, sw, 0, 0, sw, sh)
                 bmp.recycle()
 
                 EquirectRenderer.Frame(pixels, sw, sh, input.rotationMatrix, hFovDeg)
-            } catch (e: Exception) { null }
+            } catch (e: Exception) {
+                android.util.Log.w("StitchingEngine", "Could not decode ${input.file.name}", e)
+                null
+            }
         }
+        val failedFrames = decoded.count { it == null }
+        val frames = decoded.filterNotNull()
 
         if (frames.isEmpty()) throw IllegalStateException("No frames could be loaded for stitching")
         onProgress(0.05f)
@@ -117,11 +126,16 @@ object StitchingEngine {
         val outBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         outBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
         outputFile.parentFile?.mkdirs()
-        outputFile.outputStream().buffered().use { stream ->
+        val written = outputFile.outputStream().buffered().use { stream ->
             outBmp.compress(Bitmap.CompressFormat.JPEG, 92, stream)
         }
         outBmp.recycle()
+        // compress() reports failure (full disk, closed stream) by returning false, not by throwing
+        if (!written || outputFile.length() == 0L) {
+            outputFile.delete()
+            throw java.io.IOException("Không lưu được ảnh panorama (bộ nhớ đầy?)")
+        }
         onProgress(1f)
-        coverage
+        StitchOutcome(coverage, framesUsed = frames.size, framesFailed = failedFrames)
     }
 }

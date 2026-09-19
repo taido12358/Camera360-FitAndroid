@@ -29,7 +29,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -64,20 +66,25 @@ fun PanoramaViewer(path: String, onClose: () -> Unit) {
 
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onSizeChanged { size = it }
             .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 8f)
-                    // keep the image from being dragged far off screen
-                    val limit = 600f * scale
-                    offset = Offset(
-                        (offset.x + pan.x * scale).coerceIn(-limit, limit),
-                        (offset.y + pan.y * scale).coerceIn(-limit, limit)
-                    )
+                detectTransformGestures { centroid, pan, zoom, _ ->
+                    val newScale = (scale * zoom).coerceIn(1f, 8f)
+                    val z = newScale / scale
+                    // graphicsLayer scales about the view centre and then translates: keep the point under the
+                    // pinch centroid fixed, follow the fingers 1:1 and never let the picture leave the screen.
+                    val c = Offset(centroid.x - size.width / 2f, centroid.y - size.height / 2f)
+                    val t = c + pan - (c - offset) * z
+                    val maxX = (newScale - 1f) * size.width / 2f
+                    val maxY = (newScale - 1f) * size.height / 2f
+                    offset = Offset(t.x.coerceIn(-maxX, maxX), t.y.coerceIn(-maxY, maxY))
+                    scale = newScale
                 }
             }
             .pointerInput(Unit) {
