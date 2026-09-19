@@ -1,8 +1,6 @@
 # Architecture Decision Records (ADR) Index
 
-Source of truth for architecture decisions. No decisions have been
-recorded yet — this index will list them as `ADR-NNNN-title.md` once
-written.
+Source of truth for architecture decisions, listed as `ADR-NNNN-title.md`.
 
 ## When to write an ADR
 
@@ -23,3 +21,6 @@ for example:
 
 - ADR-0001 — Camera360 is the primary project; GoldenCare is out of scope
   → ADR-0001-camera360-is-primary-project.md
+- ADR-0002 — Support phones without a rotation-vector sensor via gravity + image
+  registration (manual mode)
+  → ADR-0002-manual-mode-gravity-plus-image-registration.md
