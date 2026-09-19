@@ -148,6 +148,7 @@ object YawRegistration {
 
     private class Accum {
         var n = 0; var sa = 0.0; var sb = 0.0; var saa = 0.0; var sbb = 0.0; var sab = 0.0
+        fun reset() { n = 0; sa = 0.0; sb = 0.0; saa = 0.0; sbb = 0.0; sab = 0.0 }
         fun add(a: Float, b: Float) {
             n++; sa += a; sb += b; saa += a.toDouble() * a; sbb += b.toDouble() * b; sab += a.toDouble() * b
         }
@@ -167,18 +168,27 @@ object YawRegistration {
     private fun coarseMatch(gi: Grid, gj: Grid): Triple<Double, Double, Int>? {
         val minCells = max(MIN_OVERLAP_CELLS, (MIN_OVERLAP_FRACTION * min(validCount(gi), validCount(gj))).toInt())
         var bestShift = 0; var bestNcc = -2.0; var bestCells = 0
-        for (shift in 0 until gj.nAz) {
-            val acc = Accum()
-            for (m in 0 until gj.nEl) {
-                val row = m * gj.nAz
-                for (k in 0 until gj.nAz) {
-                    val b = gj.v[row + k]
-                    if (b.isNaN()) continue
-                    var kk = k + shift; if (kk >= gj.nAz) kk -= gj.nAz
-                    val a = gi.v[row + kk]
-                    if (a.isNaN()) continue
-                    acc.add(a, b)
-                }
+
+        // Only photo j's visible cells matter (a portrait photo covers a small part of the
+        // sphere), so walk a compact list instead of the whole azimuth/elevation grid.
+        val nAz = gj.nAz
+        val cnt = validCount(gj)
+        val rowBase = IntArray(cnt); val col = IntArray(cnt); val bv = FloatArray(cnt)
+        var c = 0
+        for (m in 0 until gj.nEl) for (k in 0 until nAz) {
+            val b = gj.v[m * nAz + k]
+            if (b.isNaN()) continue
+            rowBase[c] = m * nAz; col[c] = k; bv[c] = b; c++
+        }
+
+        val acc = Accum()
+        for (shift in 0 until nAz) {
+            acc.reset()
+            for (t in 0 until cnt) {
+                var kk = col[t] + shift; if (kk >= nAz) kk -= nAz
+                val a = gi.v[rowBase[t] + kk]
+                if (a.isNaN()) continue
+                acc.add(a, bv[t])
             }
             if (acc.n < minCells) continue
             val ncc = acc.ncc()
@@ -251,10 +261,20 @@ object YawRegistration {
     /** Solves headings from pair measurements (exposed for testing the graph logic on its own). */
     fun solve(n: Int, pairs: List<PairMatch>): Result {
         val heading = DoubleArray(n) { Double.NaN }
-        heading[0] = 0.0
 
-        // Initial headings: maximum-weight spanning tree grown from frame 0 (Prim).
-        val inTree = BooleanArray(n); inTree[0] = true
+        // Anchor on the largest group of mutually-linked photos (ties: the group holding photo 0),
+        // so one stray first shot cannot make every other photo look "unlinked".
+        val group = IntArray(n) { it }
+        fun find(x: Int): Int { var r = x; while (group[r] != r) r = group[r]; return r }
+        for (p in pairs) { val a = find(p.i); val b = find(p.j); if (a != b) group[maxOf(a, b)] = minOf(a, b) }
+        val sizes = HashMap<Int, Int>()
+        for (k in 0 until n) sizes.merge(find(k), 1, Int::plus)
+        val bestGroup = sizes.entries.maxWithOrNull(compareBy<Map.Entry<Int, Int>>({ it.value }, { it.key == find(0) }))?.key ?: find(0)
+        val root = (0 until n).first { find(it) == bestGroup }
+        heading[root] = 0.0
+
+        // Initial headings: maximum-weight spanning tree grown from the root (Prim).
+        val inTree = BooleanArray(n); inTree[root] = true
         while (true) {
             var best: PairMatch? = null; var bestFrom = -1
             for (p in pairs) {
@@ -272,7 +292,7 @@ object YawRegistration {
         // estimate, then weighted least squares (this is what closes a 360° loop).
         val nodes = (0 until n).filter { inTree[it] }
         if (nodes.size > 1) {
-            val idx = HashMap<Int, Int>().also { m -> nodes.filter { it != 0 }.forEachIndexed { k, v -> m[v] = k } }
+            val idx = HashMap<Int, Int>().also { m -> nodes.filter { it != root }.forEachIndexed { k, v -> m[v] = k } }
             val m = idx.size
 
             fun branch(p: PairMatch) =
@@ -312,6 +332,11 @@ object YawRegistration {
                     robust[e] = cauchy(heading[p.j] - heading[p.i] - chosen[e])
                 }
             }
+        }
+        // Report relative to photo 0 whenever it is part of the solved group.
+        if (!heading[0].isNaN() && heading[0] != 0.0) {
+            val h0 = heading[0]
+            for (k in 0 until n) if (!heading[k].isNaN()) heading[k] -= h0
         }
         return Result(heading, unreachable, pairs)
     }

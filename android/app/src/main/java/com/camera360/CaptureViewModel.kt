@@ -31,6 +31,9 @@ private const val ALIGNMENT_THRESHOLD_DEG = 10f
 /** How often the auto-capture loop polls alignment state. */
 private const val AUTO_CAPTURE_POLL_MS = 60L
 
+/** Long side (px) of the grayscale copies used for image registration in manual mode. */
+private const val GRAY_LONG_SIDE = 192
+
 /** How long alignment must hold continuously before auto-capture fires — avoids motion blur / false triggers while swinging past a target. */
 private const val AUTO_CAPTURE_STABLE_MS = 350L
 
@@ -64,8 +67,21 @@ private fun generateFrames(): List<FrameTarget> = buildList {
     }
 }
 
+/**
+ * One photo taken in manual mode (device without a rotation-vector sensor).
+ * [gravityUp] is world "up" in device coordinates at the moment of the shutter
+ * press (from the accelerometer) — pitch/roll for stitching; the heading is
+ * recovered later from the images ([YawRegistration]).
+ */
+class ManualShot(val filePath: String, val gravityUp: FloatArray?)
+
 data class CaptureState(
     val capturedFrames: Int = 0,
+    // Manual mode (no rotation-vector sensor): free-form list of photos + live gravity.
+    val manualShots: List<ManualShot> = emptyList(),
+    val currentGravityUp: FloatArray? = null,
+    // Non-fatal note after a successful stitch (e.g. some photos had to be left out).
+    val stitchNotice: String? = null,
     val totalFrames: Int = 24,
     val isCapturing: Boolean = false,
     val lastError: String? = null,
@@ -116,6 +132,12 @@ data class CaptureState(
         }
 
     val allCaptured: Boolean get() = frames.all { it.captured }
+
+    /** True when this device has no rotation-vector sensor: free-form shots + image-based stitching. */
+    val isManualMode: Boolean get() = hasGyroscope == false
+
+    /** Photos taken so far, in whichever mode is active. */
+    val shotCount: Int get() = if (isManualMode) manualShots.size else capturedFrames
 
     /** (captured, total) per row: 0 = lower (-35°), 1 = middle (0°), 2 = upper (+35°) */
     val rowProgress: List<Pair<Int, Int>>
@@ -183,8 +205,13 @@ class CaptureViewModel : ViewModel() {
         return present
     }
 
+    private var gravityJob: Job? = null
+
     fun startSensor(context: Context) {
-        if (!ensureGyroscopeChecked(context)) return
+        if (!ensureGyroscopeChecked(context)) {
+            startGravity(context)
+            return
+        }
         viewModelScope.launch {
             GyroscopeManager(context.applicationContext).orientationFlow().collect { o ->
                 _state.value = _state.value.copy(
@@ -193,6 +220,16 @@ class CaptureViewModel : ViewModel() {
                     currentRotationMatrix = o.rotationMatrix
                 )
             }
+        }
+    }
+
+    /** Manual mode: keep the latest gravity direction so each shot can record its pitch/roll. */
+    private fun startGravity(context: Context) {
+        if (gravityJob != null) return
+        val gm = GravityManager(context.applicationContext)
+        if (!gm.isAvailable) return
+        gravityJob = viewModelScope.launch {
+            gm.upFlow().collect { up -> _state.value = _state.value.copy(currentGravityUp = up) }
         }
     }
 
@@ -246,7 +283,11 @@ class CaptureViewModel : ViewModel() {
 
     fun capturePhoto(imageCapture: ImageCapture, context: Context) {
         val s = _state.value
-        if (s.isCapturing || s.allCaptured) return
+        if (s.isCapturing || s.allCaptured || s.isStitching) return
+        if (s.isManualMode) {
+            captureManualShot(imageCapture, context)
+            return
+        }
         val idx = s.nearestUncapturedIndex
         if (idx < 0) return
 
@@ -290,7 +331,129 @@ class CaptureViewModel : ViewModel() {
         })
     }
 
+    /** Manual mode: take a photo and remember the gravity direction it was taken with. */
+    private fun captureManualShot(imageCapture: ImageCapture, context: Context) {
+        val s = _state.value
+        val gravity = s.currentGravityUp?.copyOf()
+        _state.value = s.copy(isCapturing = true, lastError = null, stitchNotice = null)
+
+        val framesDir = File(context.filesDir, "frames").also { it.mkdirs() }
+        val frameFile = File(framesDir, "manual_%04d.jpg".format(s.manualShots.size + 1))
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(frameFile).build()
+
+        imageCapture.takePicture(outputOptions, executor, object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                copyToGallery(context, frameFile,
+                    "Camera360_manual_%d.jpg".format(System.currentTimeMillis()))
+                val cur = _state.value
+                _state.value = cur.copy(
+                    isCapturing = false,
+                    manualShots = cur.manualShots + ManualShot(frameFile.absolutePath, gravity),
+                    lastError = if (gravity == null) "Không đọc được cảm biến gia tốc — ảnh này không thể dùng để ghép" else null
+                )
+            }
+
+            override fun onError(ex: ImageCaptureException) {
+                Log.e("CaptureVM", "Manual capture failed", ex)
+                _state.value = _state.value.copy(isCapturing = false, lastError = ex.message ?: "Lỗi chụp ảnh")
+            }
+        })
+    }
+
+    /** Manual mode: drop the most recent shot (e.g. it was blurry). */
+    fun undoLastManualShot() {
+        val s = _state.value
+        if (s.isStitching || s.manualShots.isEmpty()) return
+        _state.value = s.copy(manualShots = s.manualShots.dropLast(1), lastError = null, stitchError = null, stitchNotice = null)
+    }
+
+    /**
+     * Manual mode stitching: recover each photo's heading from the images
+     * (gravity gives pitch/roll — see [YawRegistration]), then render with the
+     * regular pose-driven [StitchingEngine].
+     */
+    private fun stitchManual(context: Context) {
+        val s = _state.value
+        if (s.isStitching) return
+        val shots = s.manualShots
+        if (shots.size < 2) {
+            _state.value = s.copy(stitchError = "Cần ít nhất 2 ảnh chồng lấn nhau để ghép")
+            return
+        }
+        _state.value = s.copy(isStitching = true, stitchProgress = 0f, stitchError = null, stitchNotice = null, stitchedFilePath = null)
+
+        viewModelScope.launch {
+            try {
+                val hFov = s.measuredHFovDeg ?: StitchingEngine.CAMERA_HFOV_DEG
+                val outputFile = File(context.filesDir, "panorama_${System.currentTimeMillis()}.jpg")
+                var dropped = 0
+
+                withContext(Dispatchers.Default) {
+                    // 1) small grayscale copies + gravity for every usable shot
+                    val usableShots = ArrayList<ManualShot>()
+                    val gray = ArrayList<GrayFrame>()
+                    for ((k, shot) in shots.withIndex()) {
+                        val up = shot.gravityUp
+                        val g = if (up == null) null else loadGray(File(shot.filePath), up)
+                        if (g != null) { usableShots.add(shot); gray.add(g) } else dropped++
+                        _state.value = _state.value.copy(stitchProgress = 0.05f * (k + 1) / shots.size)
+                    }
+                    if (gray.size < 2) throw IllegalStateException("Không đọc được đủ ảnh để ghép")
+
+                    // 2) heading of each photo from image registration
+                    val reg = YawRegistration.estimateHeadings(gray, hFov)
+                    _state.value = _state.value.copy(stitchProgress = 0.30f)
+                    val linked = gray.indices.filter { !reg.headingsDeg[it].isNaN() }
+                    if (linked.size < 2) {
+                        throw IllegalStateException(
+                            "Không tìm thấy phần chung giữa các ảnh. Hãy chụp lại: xoay chậm, mỗi ảnh chồng lấn " +
+                                "khoảng 30–50% với ảnh trước, và hướng vào cảnh có nhiều chi tiết (không phải tường trơn)."
+                        )
+                    }
+                    dropped += gray.size - linked.size
+                    val poses = YawRegistration.poses(gray, reg.headingsDeg)
+
+                    // 3) pose-driven rendering (with exposure compensation)
+                    val inputs = linked.map { StitchingEngine.FrameInput(File(usableShots[it].filePath), poses[it]) }
+                    StitchingEngine.stitch(inputs, outputFile, hFovDeg = hFov) { p ->
+                        _state.value = _state.value.copy(stitchProgress = 0.30f + 0.70f * p)
+                    }
+                    copyToGallery(context, outputFile, "Camera360_panorama_${System.currentTimeMillis()}.jpg")
+                }
+
+                _state.value = _state.value.copy(
+                    isStitching = false,
+                    stitchProgress = 1f,
+                    stitchedFilePath = outputFile.absolutePath,
+                    stitchNotice = if (dropped > 0) "Đã bỏ $dropped ảnh không đủ phần chung với các ảnh còn lại" else null
+                )
+            } catch (e: Exception) {
+                Log.e("CaptureVM", "Manual stitching failed", e)
+                _state.value = _state.value.copy(isStitching = false, stitchError = e.message ?: "Lỗi ghép ảnh")
+            }
+        }
+    }
+
+    /** Small upright grayscale copy of a photo for image registration. */
+    private fun loadGray(file: File, gravityUp: FloatArray): GrayFrame? {
+        if (!file.exists()) return null
+        val bmp = ImageIo.loadUpright(file, GRAY_LONG_SIDE) ?: return null
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        val luma = FloatArray(w * h) {
+            val c = px[it]
+            0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
+        }
+        return GrayFrame(w, h, luma, doubleArrayOf(gravityUp[0].toDouble(), gravityUp[1].toDouble(), gravityUp[2].toDouble()))
+    }
+
     fun stitchPanorama(context: Context) {
+        if (_state.value.isManualMode) {
+            stitchManual(context)
+            return
+        }
         val s = _state.value
         if (!s.allCaptured || s.isStitching) return
 
@@ -354,7 +517,8 @@ class CaptureViewModel : ViewModel() {
         // logic thinking it's still "unknown".
         _state.value = CaptureState(
             hasGyroscope = hasGyroscope,
-            measuredHFovDeg = _state.value.measuredHFovDeg
+            measuredHFovDeg = _state.value.measuredHFovDeg,
+            currentGravityUp = _state.value.currentGravityUp
         )
     }
 

@@ -36,3 +36,10 @@
 - Emulator testing: `adb emu sensor set orientation` does NOT move the
   rotation vector. Drive `acceleration` + `magnetic-field` instead (the fused
   rotation vector is computed from them).
+
+## Devices without a rotation-vector sensor (2026-09-20)
+
+Do not assume `TYPE_ROTATION_VECTOR` exists (Galaxy A12 has only an
+accelerometer). Use `GravityManager` for pitch/roll and recover heading from the
+images (`YawRegistration`); see docs/modules/camera360-stitching.md. Keep the
+guided 24-frame mode for devices that do have the sensor.

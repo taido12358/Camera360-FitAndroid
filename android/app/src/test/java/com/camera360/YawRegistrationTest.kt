@@ -150,6 +150,18 @@ class YawRegistrationTest {
         assertEquals(listOf(1), res.unreachable)
     }
 
+    @Test fun strayFirstShot_doesNotSinkTheOthers() {
+        val stray = photo(World(99), PoseMath.rotationFromAzElRoll(0.0, 0.0))
+        val world = World(4)
+        val azs = listOf(100.0, 140.0, 180.0, 220.0)
+        val frames = listOf(stray) + azs.map { photo(world, PoseMath.rotationFromAzElRoll(it, 0.0)) }
+        val res = YawRegistration.estimateHeadings(frames, longFov)
+        assertEquals("only the stray photo is left out", listOf(0), res.unreachable)
+        // the others still get consistent relative headings (anchored on the linked group)
+        val rel = (1 until frames.size).map { res.headingsDeg[it] - res.headingsDeg[1] }
+        rel.forEachIndexed { k, v -> assertEquals(azs[k] - azs[0], v, 1.5) }
+    }
+
     @Test fun nonOverlappingPhotos_areNotLinked() {
         val world = World(9)
         val a = photo(world, PoseMath.rotationFromAzElRoll(0.0, 0.0))

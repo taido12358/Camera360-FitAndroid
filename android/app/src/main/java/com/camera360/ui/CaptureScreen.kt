@@ -298,34 +298,21 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
         // understands up front why auto-capture/AR guidance are unavailable,
         // instead of only discovering it after capturing all 24 frames and
         // hitting a stitch error (see CaptureViewModel.ensureGyroscopeChecked). ──
-        if (state.hasGyroscope == false) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .statusBarsPadding()
-                    .fillMaxWidth()
-                    .background(Color(0xFFB00020).copy(alpha = 0.92f))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    "Thiết bị không có cảm biến con quay hồi chuyển — chỉ hỗ trợ chụp thủ công, " +
-                        "không thể tự động căn chỉnh hoặc ghép panorama.",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+        if (state.isManualMode) {
+            ManualModePanel(
+                modifier = Modifier.align(Alignment.TopCenter),
+                shotCount = state.shotCount,
+                stitching = state.isStitching,
+                done = state.stitchedFilePath != null
+            )
         }
 
-        // ── Top HUD: total + per-row progress ────────────────────────────
-        // Pushed down when the no-gyroscope banner above is showing so the two don't overlap.
-        Box(
+        // ── Top HUD: total + per-row progress (guided 24-frame mode only) ─
+        if (!state.isManualMode) Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = if (state.hasGyroscope == false) 52.dp else 12.dp)
+                .padding(top = 12.dp)
                 .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(14.dp))
                 .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
@@ -425,11 +412,14 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                     onReset = { viewModel.resetForNewSession() }
                 )
 
-                // All frames captured, but stitching needs per-frame gyroscope
-                // poses this device doesn't have — say so plainly instead of
-                // letting the user tap "Stitch" into the same error.
-                state.allCaptured && state.hasGyroscope == false -> NoGyroscopeStitchUnavailableUI(
-                    onReset = { viewModel.resetForNewSession() }
+                // Manual mode (no rotation-vector sensor): free-form shots, undo, and a
+                // stitch button once there are at least two photos to match.
+                state.isManualMode -> ManualControlsRow(
+                    shotCount = state.shotCount,
+                    isCapturing = state.isCapturing,
+                    onCapture = { viewModel.capturePhoto(imageCapture, context) },
+                    onUndo = { viewModel.undoLastManualShot() },
+                    onStitch = { viewModel.stitchPanorama(context) }
                 )
 
                 // All frames captured — offer stitching
@@ -457,6 +447,18 @@ fun CaptureScreen(viewModel: CaptureViewModel = viewModel()) {
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 Text(text = err, color = Color.White, fontSize = 13.sp)
+            }
+        }
+        state.stitchNotice?.let { note ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 230.dp)
+                    .background(Color(0xFF37474F).copy(alpha = 0.92f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(text = note, color = Color.White, fontSize = 12.sp)
             }
         }
     }
@@ -590,7 +592,12 @@ private fun SphereGuideOverlay(
 // when the sensor can't confirm alignment (e.g. no gyroscope) or the user
 // wants to force a shot early.
 @Composable
-private fun ShutterButton(isCapturing: Boolean, isAligned: Boolean, onCapture: () -> Unit) {
+private fun ShutterButton(
+    isCapturing: Boolean,
+    isAligned: Boolean,
+    onCapture: () -> Unit,
+    label: String = "Chụp thủ công (dự phòng)"
+) {
     val ringColor  = if (isAligned) Color(0xFFFFEB3B) else Color.White
     val innerColor = when { isCapturing -> Color.Gray; isAligned -> Color(0xFFFFEB3B); else -> Color.White }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -605,7 +612,7 @@ private fun ShutterButton(isCapturing: Boolean, isAligned: Boolean, onCapture: (
             )
         }
         Spacer(modifier = Modifier.height(6.dp))
-        Text("Chụp thủ công (dự phòng)", color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp)
+        Text(label, color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp)
     }
 }
 
@@ -625,24 +632,87 @@ private fun StitchPromptUI(onStitch: () -> Unit) {
     }
 }
 
+/**
+ * Instructions card for manual mode (device has no rotation-vector sensor, so
+ * there is no AR guidance): explains how to shoot for the image-based stitcher.
+ */
 @Composable
-private fun NoGyroscopeStitchUnavailableUI(onReset: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+private fun ManualModePanel(modifier: Modifier, shotCount: Int, stitching: Boolean, done: Boolean) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .statusBarsPadding()
+            .padding(top = 10.dp, start = 12.dp, end = 12.dp)
+            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+    ) {
         Text(
-            "24/24 ảnh đã chụp, nhưng thiết bị không có cảm biến\ncon quay hồi chuyển nên không thể ghép panorama.",
-            color = Color(0xFFFFEB3B),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            text = when {
+                done -> "Panorama đã hoàn chỉnh!"
+                stitching -> "Đang ghép panorama…"
+                else -> "$shotCount ảnh"
+            },
+            color = if (done) Color(0xFF4CAF50) else Color.White,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold
         )
-        Spacer(modifier = Modifier.height(10.dp))
-        Box(
-            modifier = Modifier
-                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-                .clickable(onClick = onReset)
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-        ) {
-            Text("Chụp lại", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        if (!stitching && !done) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Máy không có cảm biến con quay nên chụp thủ công: xoay chậm quanh mình, " +
+                    "chụp mỗi khi xoay ~30–40°, để mỗi ảnh chồng lấn 30–50% với ảnh trước. " +
+                    "Giữ máy đứng, đứng yên khi bấm chụp.",
+                color = Color.White.copy(alpha = 0.78f),
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun ManualControlsRow(
+    shotCount: Int,
+    isCapturing: Boolean,
+    onCapture: () -> Unit,
+    onUndo: () -> Unit,
+    onStitch: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        // Undo (left) — invisible spacer of the same width when there is nothing to undo
+        if (shotCount > 0) {
+            Box(
+                modifier = Modifier
+                    .size(width = 84.dp, height = 44.dp)
+                    .background(Color.White.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+                    .clickable(onClick = onUndo),
+                contentAlignment = Alignment.Center
+            ) { Text("Xóa ảnh cuối", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium) }
+        } else {
+            Spacer(modifier = Modifier.width(84.dp))
+        }
+
+        ShutterButton(
+            isCapturing = isCapturing,
+            isAligned = false,
+            label = "Chụp",
+            onCapture = onCapture
+        )
+
+        // Stitch (right) — needs at least two photos to have anything to match
+        if (shotCount >= 2) {
+            Box(
+                modifier = Modifier
+                    .size(width = 84.dp, height = 44.dp)
+                    .background(Color(0xFF1565C0), RoundedCornerShape(10.dp))
+                    .clickable(onClick = onStitch),
+                contentAlignment = Alignment.Center
+            ) { Text("Ghép ảnh", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        } else {
+            Spacer(modifier = Modifier.width(84.dp))
         }
     }
 }

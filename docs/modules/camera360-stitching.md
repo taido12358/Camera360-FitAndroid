@@ -96,3 +96,29 @@ Verification status: solver unit-tested; runs end-to-end on the emulator
 emulator returns the same image for every pose, which makes the overlaps
 geometrically inconsistent (it produced a darker panorama, an artefact of
 that data). Check on a real device that seams between shots visibly even out.
+
+## Accelerometer-only pose reconstruction (`YawRegistration`, 2026-09-20)
+
+For devices with no gyroscope/magnetometer. Gravity gives pitch/roll; only
+each photo's heading is unknown.
+
+1. Every photo is warped into a gravity-levelled (azimuth, elevation) frame
+   where it initially looks at azimuth 0 (`PoseMath.rotationFromGravity(up, 0)`).
+   If photo j was turned by delta = heading_j - heading_i relative to photo i,
+   the scene at azimuth a in j appears at a + delta in i, so delta is a pure
+   horizontal shift.
+2. For every pair, coarse circular search (2 deg steps, high-passed luma so
+   exposure/vignetting drop out, normalised cross-correlation on the overlap),
+   then 0.25 deg refinement. Pairs need >= ~12x12 deg overlap and NCC >= 0.45.
+3. Headings solve: maximum-weight spanning tree from the largest linked group
+   for the initial estimate, then weighted least squares over *all* pairs with
+   Cauchy IRLS (scale 3 deg) so a false match cannot drag the chain, and the
+   360 deg loop closes by spreading the error.
+
+Verified on the JVM against a synthetic textured sphere with known poses
+(`YawRegistrationTest`: level/rolled/noisy gravity, negative direction, full
+circle, shuffled capture order, outlier pairs, unrelated/non-overlapping
+photos, stray first photo). NOT yet verified with real photos on the phone —
+needs textured scenes (blank walls have nothing to correlate).
+Limits: assumes a rigid camera rotation (no parallax), a correct FOV, and
+accelerometer gravity within ~1 deg (hold still when shooting).

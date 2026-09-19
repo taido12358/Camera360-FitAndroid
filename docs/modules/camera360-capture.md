@@ -69,3 +69,22 @@ device→world rotation matrix, same right/up/-forward convention as
 lines rotate with the phone. The az/pitch-only `projectToScreen` is now only
 a fallback when no matrix has arrived yet. Verified on emulator with a 30°
 roll pose (`scratchpad` pose script: accel+mag).
+
+## Manual mode for phones without a rotation-vector sensor (2026-09-20)
+
+`CaptureState.isManualMode` (= `hasGyroscope == false`), found on the real test
+phone (Galaxy A12: accelerometer only). Instead of refusing to work:
+
+- `GravityManager` streams world-up in device coordinates from the
+  accelerometer (`TYPE_GRAVITY` if present, else low-passed
+  `TYPE_ACCELEROMETER`). Each shot stores that vector (`ManualShot`) — this
+  fixes pitch and roll exactly.
+- No AR dots / 24-frame targets / auto-capture. `ManualModePanel` shows shot
+  count + how to shoot (rotate slowly, ~30-40 deg per shot, 30-50 % overlap,
+  hold still). Bottom row: undo-last / shutter / stitch (needs >= 2 shots).
+- Stitching (`CaptureViewModel.stitchManual`): downscale each photo to a
+  192 px grayscale copy, `YawRegistration.estimateHeadings` recovers each
+  photo's heading from image content, `PoseMath.rotationFromGravity` builds the
+  full pose, then the normal `StitchingEngine` renders (with gain
+  compensation). Photos that cannot be linked to the rest are dropped with a
+  notice; if fewer than 2 link, a Vietnamese error explains how to reshoot.
