@@ -22,7 +22,7 @@ docs/project/requirements.md.
   phone): free-form shots, gravity pitch/roll, heading from image registration,
   crop to covered area. See tasks/active/current-task.md.
 - Portrait-locked activity; EXIF rotation applied when stitching.
-- 36 JVM unit tests + 1 on-device benchmark test.
+- 44 JVM unit tests + 1 on-device benchmark test.
 
 ## Verified
 

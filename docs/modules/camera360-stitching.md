@@ -214,3 +214,19 @@ heading-consistent edges (weighted LS, mean removed since only relative bias is
 observable, capped at 3 deg) and `poses(frames, headings, pitchOffsets)` tilts
 each pose by -b_p via `PoseMath.tiltElevation` (sign pinned by a unit test).
 Test with injected +-1.5 deg biases: mean pitch error 0.56 -> 0.14 deg.
+
+## Renderer split + quantitative ground-truth tests (2026-09-20)
+
+The pure inverse-projection renderer now lives in `EquirectRenderer` (no Android
+dependency: bit ops instead of `Color`, plain threads instead of coroutines);
+`StitchingEngine` only decodes (EXIF-upright), calls it, crops and encodes.
+`EquirectRendererTest` photographs a coloured textured synthetic sphere with
+virtual cameras at known poses (3 rows x 10 photos, 240x320) and compares the
+rendered 720x360 panorama with the true sphere per pixel:
+
+- exact poses: RMS colour error **1.03 / 255** (geometry verified end to end;
+  a mirrored-pose control renders > 15, so the test can fail);
+- exposure drift +-22 % per channel: RMSE **13.95 -> 4.75** with gain
+  compensation (previously only eyeballed);
+- blend sharpness `blendPower` with 0.6 deg yaw error: 0.5 -> 2.49, 1 -> 2.61,
+  2 -> 2.76, 4 -> 2.89 (softer hides small pose errors slightly better; kept 1.0).
