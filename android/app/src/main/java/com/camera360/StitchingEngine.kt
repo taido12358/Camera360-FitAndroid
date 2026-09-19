@@ -3,6 +3,8 @@ package com.camera360
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
+import android.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -83,9 +85,12 @@ object StitchingEngine {
 
     /**
      * Stitch [inputs] into an equirectangular JPEG at [outputFile], using
-     * [hFovDeg] as the camera's horizontal field of view — pass the value
-     * measured from [android.hardware.camera2.CameraCharacteristics] for best
-     * accuracy; only fall back to [CAMERA_HFOV_DEG] if measurement failed.
+     * [hFovDeg] as the camera's field of view along the sensor's LONG side
+     * (the "horizontal" FOV of a landscape frame) — pass the value measured
+     * from [android.hardware.camera2.CameraCharacteristics] for best accuracy;
+     * only fall back to [CAMERA_HFOV_DEG] if measurement failed. The FOV across
+     * the short side is derived from the frame's pixel aspect ratio, so this
+     * works for whatever orientation the frame ends up in after EXIF rotation.
      * [onProgress] is called with 0..1 on the IO thread — safe to update StateFlow.
      */
     suspend fun stitch(
@@ -96,8 +101,7 @@ object StitchingEngine {
     ) = withContext(Dispatchers.IO) {
         onProgress(0f)
 
-        val hFovRad = Math.toRadians(hFovDeg)
-        val tanHalfHFov = tan(hFovRad / 2.0)
+        val tanHalfLong = tan(Math.toRadians(hFovDeg) / 2.0)
 
         // ── Load frames at reduced resolution ──────────────────────────────
         val frames = inputs.mapNotNull { input ->
@@ -108,8 +112,12 @@ object StitchingEngine {
                 val sampleSize = (longSide / MAX_FRAME_LONG_SIDE).coerceAtLeast(1)
 
                 val loadOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-                val bmp = BitmapFactory.decodeFile(input.file.absolutePath, loadOpts)
+                val decoded = BitmapFactory.decodeFile(input.file.absolutePath, loadOpts)
                     ?: return@mapNotNull null
+                // CameraX stores the sensor-oriented pixels plus an EXIF rotation tag;
+                // BitmapFactory ignores the tag, so apply it here — the stitching basis
+                // (right = device +X, up = device +Y) assumes an upright portrait frame.
+                val bmp = applyExifRotation(decoded, exifRotationDegrees(input.file))
 
                 val sw = bmp.width; val sh = bmp.height
                 if (sw <= 0 || sh <= 0) { bmp.recycle(); return@mapNotNull null }
@@ -118,12 +126,14 @@ object StitchingEngine {
                 bmp.recycle()
 
                 val (right, up, fwd) = cameraBasisFromRotationMatrix(input.rotationMatrix)
-                val vFovRad = hFovRad * sh / sw
+                // Focal length in pixels from the long-side FOV, then the true
+                // (rectilinear) half-FOV tangents for each axis.
+                val focalPx = (maxOf(sw, sh) / 2.0) / tanHalfLong
                 FrameData(
                     pixels = pixels, width = sw, height = sh,
                     right = right, up = up, fwd = fwd,
-                    tanHalfHFov = tanHalfHFov,
-                    tanHalfVFov = tan(vFovRad / 2.0)
+                    tanHalfHFov = (sw / 2.0) / focalPx,
+                    tanHalfVFov = (sh / 2.0) / focalPx
                 )
             } catch (e: Exception) { null }
         }
@@ -239,5 +249,25 @@ object StitchingEngine {
                 )
             } else Color.BLACK
         }
+    }
+
+    /** EXIF rotation (clockwise degrees needed to display upright), 0 if unknown. */
+    private fun exifRotationDegrees(file: File): Int = try {
+        when (ExifInterface(file.absolutePath)
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    } catch (e: Exception) { 0 }
+
+    /** Returns [bmp] rotated clockwise by [degrees]; recycles [bmp] if a copy was made. */
+    private fun applyExifRotation(bmp: Bitmap, degrees: Int): Bitmap {
+        if (degrees == 0) return bmp
+        val m = Matrix().apply { postRotate(degrees.toFloat()) }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        if (rotated !== bmp) bmp.recycle()
+        return rotated
     }
 }

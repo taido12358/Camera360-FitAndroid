@@ -72,6 +72,20 @@ import kotlin.math.tan
 // ── Perspective projection helpers ──────────────────────────────────────────────
 
 /**
+ * Focal length in on-screen pixels for the camera preview.
+ *
+ * [longSideFovDeg] is the FOV along the sensor's long side (what
+ * CameraCharacteristics gives us). The preview is a 4:3 portrait image shown
+ * with FILL_CENTER, i.e. scaled up until it covers the whole screen, so the
+ * long side spans max(screenH, screenW·4/3) pixels — on the usual tall phone
+ * screens that is the screen *height*, NOT the width (the sides are cropped).
+ */
+private fun previewFocalLengthPx(screenW: Float, screenH: Float, longSideFovDeg: Double): Double {
+    val longSidePx = maxOf(screenH.toDouble(), screenW * 4.0 / 3.0)
+    return (longSidePx / 2.0) / tan(Math.toRadians(longSideFovDeg / 2.0))
+}
+
+/**
  * Projects a world-space point at ([targetAz]°, [targetPitch]°) onto the screen
  * using proper 3D perspective math given the current camera direction
  * ([camAz]°, [camPitch]°) and a horizontal FOV of [hFovDeg]°.
@@ -105,7 +119,7 @@ private fun projectToScreen(
     if (camZ <= 0.01) return null   // behind camera
 
     // Perspective divide → screen coordinates
-    val focalLen = (screenW / 2.0) / tan(Math.toRadians(hFovDeg / 2.0))
+    val focalLen = previewFocalLengthPx(screenW, screenH, hFovDeg)
     val sx = (screenW / 2.0 + focalLen * camX / camZ).toFloat()
     val sy = (screenH / 2.0 - focalLen * camY / camZ).toFloat()
     return Offset(sx, sy)
@@ -138,7 +152,7 @@ private fun projectToScreenWithMatrix(
 
     if (camZ <= 0.01) return null   // behind camera
 
-    val focalLen = (screenW / 2.0) / tan(Math.toRadians(hFovDeg / 2.0))
+    val focalLen = previewFocalLengthPx(screenW, screenH, hFovDeg)
     val sx = (screenW / 2.0 + focalLen * camX / camZ).toFloat()
     val sy = (screenH / 2.0 - focalLen * camY / camZ).toFloat()
     return Offset(sx, sy)
@@ -164,7 +178,9 @@ private fun projectTarget(
 }
 
 /**
- * Reads the bound back camera's real horizontal FOV from its
+ * Reads the bound back camera's real FOV along the sensor's LONG side (the
+ * "horizontal" FOV of a landscape frame — NOT the portrait screen's horizontal
+ * FOV; see [previewFocalLengthPx] and StitchingEngine.stitch) from its
  * [CameraCharacteristics] (focal length + physical sensor size) instead of
  * relying on [StitchingEngine.CAMERA_HFOV_DEG]'s hardcoded assumption — this
  * is what both the AR guide overlay and the final stitch should use for

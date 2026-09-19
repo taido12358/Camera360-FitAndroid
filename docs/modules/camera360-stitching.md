@@ -59,3 +59,22 @@ sin/cos tables. On the emulator this took the 24-frame stitch from ~50 s to
 ~26 s. Output pixels are identical in geometry; only sampling smoothness
 changed. `onProgress` is now called from worker threads (still safe for a
 StateFlow), so values may arrive very slightly out of order.
+
+## EXIF rotation + FOV semantics (2026-09-19, found on emulator)
+
+- CameraX saves JPEGs as **sensor-oriented pixels + an EXIF rotation tag**
+  (emulator: 1280x960 landscape, orientation 6). `BitmapFactory` ignores the
+  tag, so the stitcher used to lay frames in *sideways*. `StitchingEngine`
+  now reads `ExifInterface` and rotates each frame upright before use.
+- `hFovDeg` (and `CaptureState.measuredHFovDeg`) means the FOV along the
+  sensor's **long side**, exactly what `CameraCharacteristics` gives
+  (physical sensor width / focal length). Per frame the engine derives
+  `focalPx = (longSidePx/2)/tan(fov/2)` and true rectilinear half-FOV
+  tangents for both axes (the old code scaled the *angle* by aspect ratio,
+  which is wrong for wide lenses).
+- The AR overlay uses the same value via `previewFocalLengthPx`: the 4:3
+  preview is shown FILL_CENTER, so on tall phone screens the long side maps
+  to the screen *height*, not width.
+- Emulator caveat: the emulator's reported sensor size/focal length gives an
+  unrealistically wide FOV (~104°), so overlay dot spacing and overlap on the
+  emulator are not representative; real devices report real values.
